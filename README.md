@@ -7,7 +7,7 @@
 ╚═╝     ╚═╝       ╚═════╝ ╚═╝  ╚═╝╚═╝ ╚═╝     ╚═╝  ╚═╝
 ```
 
-VJ software is a racket. the good tools are locked behind subscriptions, the free ones are toys, and the cracks carry malware. m-or.ph is what happens when you stop waiting for someone to build the right thing and just build it yourself. runs entirely in a browser. does exactly what it says.
+VJ software is a racket. the good tools are locked behind subscriptions, the free ones are toys, and the cracks carry malware. [m-or.ph](https://m-or.ph/) is what happens when you stop waiting for someone to build the right thing and just build it yourself. runs entirely in a browser. does exactly what it says.
 
 built by [vandope](https://instagram.com/vandope__) — visual engineer and creative technologist, Manila, Philippines.
 
