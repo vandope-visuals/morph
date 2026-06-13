@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta name="google-site-verification" content="jKATEJ0NIycjLPBmP_uEWkPSWHojTjq6-ZS8xOji_uI" />
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>m-or.ph</title>
@@ -1241,8 +1240,9 @@ body.tv .app{
   width:640px;height:480px;
   position:fixed;left:0;top:0;
   transform-origin:top left;
-  /* JS (_fitTVStage) sets translate(px)+scale to center and fill at 4:3 —
-     layout always stays 640×480, only the transform scales */
+  /* JS (_fitTVStage) sets scale(sx,sy) to stretch-fill the viewport
+     (anamorphic — corrects for widescreen output squeezed to 4:3 by the
+     tube). Layout always stays 640×480, only the transform scales */
   grid-template-rows:28px 1fr;
   grid-template-columns:1fr;
   grid-template-areas:"top" "main";
@@ -7139,15 +7139,19 @@ function _updateTVSwitch(on){
   const btn=document.getElementById('btn-tv');
   if(btn){btn.classList.toggle('on',on);btn.innerHTML='<svg id="sw-tv" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-tv-knob" x="'+(on?'12':'2')+'" y="2" width="8" height="8" fill="currentColor"/></svg>'+(on?'sd':'hd');}
 }
-// fill the actual screen at 4:3: layout stays 640×480, only the transform
-// scales (fractional scale is fine — analog tubes blur it anyway)
+// stretch to fill the whole viewport: layout stays 640×480, only the
+// transform scales — X and Y independently (anamorphic). GPUs driving a
+// CRT through an adapter usually output a widescreen mode that the tube
+// squeezes back to 4:3, so pre-stretching makes geometry correct on the
+// tube. On a true 4:3 viewport sx === sy and this is identical to a
+// uniform fit. Fractional / non-square pixels are fine — analog tubes
+// blur them anyway.
 function _fitTVStage(){
   const app=document.querySelector('.app');
   if(!app) return;
   if(!document.body.classList.contains('tv')){app.style.transform='';return;}
-  const s=Math.min(window.innerWidth/640,window.innerHeight/480);
-  const ox=(window.innerWidth-640*s)/2,oy=(window.innerHeight-480*s)/2;
-  app.style.transform='translate('+ox.toFixed(1)+'px,'+oy.toFixed(1)+'px) scale('+s.toFixed(4)+')';
+  const sx=window.innerWidth/640,sy=window.innerHeight/480;
+  app.style.transform='scale('+sx.toFixed(4)+','+sy.toFixed(4)+')';
 }
 window.addEventListener('resize',_fitTVStage);
 document.addEventListener('fullscreenchange',_fitTVStage);
