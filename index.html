@@ -4238,7 +4238,7 @@ function toggleDmoshFx(modId,fxId){
     if(fxId==='delta'&&mod.dmosh){mod.dmosh.deltaBuf=null;}
     if(fxId==='aval'&&mod.dmosh){mod.dmosh.avalBuf=null;}
   } else{if(mod.activeFxQueue.length>=1)mod.activeFxQueue.shift();mod.activeFxQueue.push(fxId);}
-  document.querySelectorAll('#fxkeys-'+modId+' .fx-key').forEach(k=>k.classList.toggle('active',mod.activeFxQueue.includes(k.dataset.fxid)));
+  _fxKeysOf('fxkeys-'+modId).forEach(k=>k.classList.toggle('active',mod.activeFxQueue.includes(k.dataset.fxid)));
   const active=mod.activeFxQueue[mod.activeFxQueue.length-1];
   const lbl=document.getElementById('param-lbl-'+modId);
   if(lbl&&active)lbl.textContent=DMOSH_FX.find(f=>f.id===active)?.param||'parameters';
@@ -4620,7 +4620,7 @@ function seqLoadPreset(modId,idx){
   mod.seqPreset=idx;
   mod.seqSteps=[...mod.seqPresets[idx]];
   // update preset buttons
-  document.querySelectorAll(`#seq-presets-${modId} .fx-key`).forEach((k,i)=>{
+  _fxKeysOf('seq-presets-'+modId).forEach((k,i)=>{
     k.classList.toggle('active',i===idx);
   });
 }
@@ -4630,7 +4630,7 @@ function seqSavePreset(modId,idx){
   if(!mod.seqPresets) mod.seqPresets=SEQ_PRESETS.map(p=>[...p]);
   mod.seqPresets[idx]=[...mod.seqSteps];
   mod.seqPreset=idx;
-  document.querySelectorAll(`#seq-presets-${modId} .fx-key`).forEach((k,i)=>{
+  _fxKeysOf('seq-presets-'+modId).forEach((k,i)=>{
     k.classList.toggle('active',i===idx);
   });
   autoSave();
@@ -6038,13 +6038,17 @@ function updateCapState(){
   }
 }
 
+let _modSeq=0;
+// fx-key lookup by element id — module ids from bank restore contain '.', which breaks a css selector
+function _fxKeysOf(elId){const el=document.getElementById(elId);return el?el.querySelectorAll('.fx-key'):[];}
 function addModule(name,type,color){
   const total=state.modules.length;
   const heavy=getHeavyCount();
   if(total>=MAX_TOTAL) return;
   if(HEAVY_MODULES.has(name)&&heavy>=MAX_HEAVY) return;
 
-  const id='m'+Date.now();
+  // monotonic counter: 'm'+Date.now() collided when two modules were added in the same ms
+  const id='mod'+(++_modSeq);
   state.modules.forEach(m=>{
     m.open=false;
     const ctrl=document.getElementById('ctrl-'+m.id);
@@ -6111,7 +6115,7 @@ function setFx(modId,fxIdx){
   if(mod.name==='geometry') mod.geomAngle=0;
   if(mod.name==='LFO'){ mod.lfoPhase=0; delete mod._lfoRstep; delete mod._lfoSmooth; }
   if(mod.name==='feedback'){ mod.fbPrev=null; mod.fbMirrorX=0; mod.fbFrame=0; }
-  document.querySelectorAll('#fxkeys-'+modId+' .fx-key').forEach((k,i)=>k.classList.toggle('active',i===fxIdx));
+  _fxKeysOf('fxkeys-'+modId).forEach((k,i)=>k.classList.toggle('active',i===fxIdx));
   const lbl=document.getElementById('param-lbl-'+modId);
   if(lbl){
     const map2={color:COLOR_FX,geometry:GEOM_FX,feedback:FEEDBACK_FX,pixelops:PIXELOPS_FX,ascii:ASCII_FX,keyer:KEYER_FX,randwalk:RANDWALK_FX,perlin:PERLIN_FX,vhs:null,blockcorrupt:null,rowshift:null,pixelsort:null,signalnoise:null};
