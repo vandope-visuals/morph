@@ -7302,6 +7302,24 @@ function toggleCRT(){
   if(on){ _startCRTGlitch(); }
   else { _stopCRTGlitch(); }
 }
+// every CRT timer is tracked so rapid toggles can't pile up flicker chains
+// or leave a pending "slip" that later wipes the .app transform (TV scaling)
+const _crtTos=new Set();
+let _crtRollAnim=null;
+function _crtTo(fn,ms){const id=setTimeout(()=>{_crtTos.delete(id);fn();},ms);_crtTos.add(id);return id;}
+// rolling band on the compositor: WAAPI transform instead of moving `top`
+// every 30ms (a layout per tick). same path: 0.4%/30ms of the overlay height,
+// first pass from -40%, then looping -10% → 110%
+function _crtRoll(roller,fromPct){
+  if(_crtRollAnim){_crtRollAnim.onfinish=null;_crtRollAnim.cancel();_crtRollAnim=null;}
+  if(!roller.isConnected||!roller.animate) return;
+  const ov=document.getElementById('crt-overlay');
+  const h=(ov&&ov.clientHeight)||window.innerHeight;
+  const dur=(110-fromPct)/0.4*30;
+  _crtRollAnim=roller.animate([{transform:'translateY('+(fromPct/100*h)+'px)'},{transform:'translateY('+(1.1*h)+'px)'}],{duration:dur,easing:'linear'});
+  _crtRollAnim.onfinish=()=>_crtRoll(roller,-10);
+}
+window.addEventListener('resize',()=>{const r=document.getElementById('crt-roller');if(r&&_crtRollAnim)_crtRoll(r,-10);});
 function _startCRTGlitch(){
   _stopCRTGlitch();
   const line=document.getElementById('crt-glitch-line');
@@ -7310,15 +7328,9 @@ function _startCRTGlitch(){
   // rolling band — a slow drifting lighter horizontal stripe
   const roller=document.createElement('div');
   roller.id='crt-roller';
-  roller.style.cssText='position:absolute;left:0;right:0;height:40px;background:rgba(255,255,255,0.03);pointer-events:none;z-index:4;top:0;transition:none;';
+  roller.style.cssText='position:absolute;left:0;right:0;height:40px;background:rgba(255,255,255,0.03);pointer-events:none;z-index:4;top:0;transition:none;will-change:transform;';
   document.getElementById('crt-overlay').appendChild(roller);
-  let rollerY=-40;
-  const rollerIv=setInterval(()=>{
-    if(!document.body.classList.contains('crt')){ clearInterval(rollerIv); roller.remove(); return; }
-    rollerY+=0.4;
-    if(rollerY>110) rollerY=-10;
-    roller.style.top=rollerY+'%';
-  },30);
+  _crtRoll(roller,-40);
 
   // subtle flicker — whole overlay dims slightly on irregular cadence
   const flickerEl=document.createElement('div');
@@ -7326,15 +7338,15 @@ function _startCRTGlitch(){
   flickerEl.style.cssText='position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;z-index:6;';
   document.getElementById('crt-overlay').appendChild(flickerEl);
   function doFlicker(){
-    if(!document.body.classList.contains('crt')){ flickerEl.remove(); return; }
+    if(!document.body.classList.contains('crt')||!flickerEl.isConnected){ flickerEl.remove(); return; }
     flickerEl.style.opacity=(0.02+Math.random()*0.03).toString();
-    setTimeout(()=>{
+    _crtTo(()=>{
       flickerEl.style.opacity='0';
       // next flicker in 2–8 seconds
-      setTimeout(doFlicker, 2000+Math.random()*6000);
+      _crtTo(doFlicker, 2000+Math.random()*6000);
     }, 60+Math.random()*80);
   }
-  setTimeout(doFlicker, 1000+Math.random()*3000);
+  _crtTo(doFlicker, 1000+Math.random()*3000);
 
   _crtGlitchIv=setInterval(()=>{
     if(!document.body.classList.contains('crt')){ _stopCRTGlitch(); return; }
@@ -7347,40 +7359,44 @@ function _startCRTGlitch(){
       line.style.opacity='1';
       line.style.width=(40+Math.random()*60)+'%';
       line.style.left=(Math.random()*30)+'%';
-      setTimeout(()=>{ if(line) line.style.opacity='0'; }, 60+Math.random()*80);
+      _crtTo(()=>{ if(line) line.style.opacity='0'; }, 60+Math.random()*80);
     }
     // wider semi-transparent band
     if(band && Math.random()>0.5){
       band.style.top=(y+Math.random()*4-2)+'%';
       band.style.opacity='1';
-      setTimeout(()=>{ if(band) band.style.opacity='0'; }, 80+Math.random()*120);
+      _crtTo(()=>{ if(band) band.style.opacity='0'; }, 80+Math.random()*120);
     }
     // vertical hold slip — whole screen shifts down for 1 frame, very rare
-    if(Math.random()>0.92){
+    const _tv=document.body.classList.contains('tv');
+    if(!_tv&&Math.random()>0.92){
       const app=document.querySelector('.app');
       if(app){
         const slip=8+Math.floor(Math.random()*16);
         app.style.transform=`translateY(${slip}px)`;
-        setTimeout(()=>{ app.style.transform=''; }, 40+Math.random()*40);
+        _crtTo(()=>{ app.style.transform=''; }, 40+Math.random()*40);
       }
     }
     // horizontal frame nudge
-    if(Math.random()>0.85){
+    if(!_tv&&Math.random()>0.85){
       const app=document.querySelector('.app');
       if(app){
         const shift=(Math.random()>0.5?1:-1)*(2+Math.floor(Math.random()*4));
         app.style.transform=`translateX(${shift}px)`;
-        setTimeout(()=>{ app.style.transform=''; }, 50+Math.random()*60);
+        _crtTo(()=>{ app.style.transform=''; }, 50+Math.random()*60);
       }
     }
   }, 400);
 }
 function _stopCRTGlitch(){
   if(_crtGlitchIv){ clearInterval(_crtGlitchIv); _crtGlitchIv=null; }
+  _crtTos.forEach(id=>clearTimeout(id));_crtTos.clear();
+  if(_crtRollAnim){_crtRollAnim.onfinish=null;_crtRollAnim.cancel();_crtRollAnim=null;}
   const app=document.querySelector('.app');
-  if(app) app.style.transform='';
-  const r=document.getElementById('crt-roller'); if(r) r.remove();
-  const f=document.getElementById('crt-flicker'); if(f) f.remove();
+  if(app&&!document.body.classList.contains('tv')) app.style.transform='';
+  const line=document.getElementById('crt-glitch-line'); if(line) line.style.opacity='0';
+  const band=document.getElementById('crt-glitch-band'); if(band) band.style.opacity='0';
+  document.querySelectorAll('#crt-roller,#crt-flicker').forEach(el=>el.remove());
 }
 /* ── PiP WINDOW ── */
 let pipActive=false;
