@@ -3542,7 +3542,7 @@ const TIPS={
     'Click any result to load it. Hit <b>refresh</b> for a new set.',
     'Good for happy accidents during live sets.'
   ]},
-  color:{icon:'■',title:'solid color',tips:[
+  solidcolor:{icon:'■',title:'solid color',tips:[
     '<b>Solid color</b> — fills the source slot with a flat color.',
     'Most useful as a <b>background layer</b> combined with the keyer module.',
     'Try: solid color in A, video in B, add a keyer — key out the background of B over the color.',
@@ -3700,7 +3700,7 @@ function setHelperContext(ctx){
   document.getElementById('helper-title').textContent=t.title;
   document.getElementById('helper-tip').innerHTML=t.tips.map(tip=>`<span class="tip-line">${tip}</span>`).join('');
 }
-const nameToKey=n=>n==='pixel operations'||n==='pixelops'?'pixelops':n==='perlin noise'?'perlin':n==='random walk'?'randwalk':n==='XY pad'?'xypad':n==='screen capture'?'screen':n==='solid color'?'color':n==='moving pattern'?'pattern':n==='mathematical'?'mathematical':n==='block corrupt'?'blockcorrupt':n==='row shift'?'rowshift':n==='pixel sort'?'pixelsort':n==='signal noise'?'signalnoise':n==='VHS'?'vhs':n==='oscillator'?'LFO':n==='archive'?'url':n==='random'?'videos':n==='text'?'text':n;
+const nameToKey=n=>n==='pixel operations'||n==='pixelops'?'pixelops':n==='perlin noise'?'perlin':n==='random walk'?'randwalk':n==='XY pad'?'xypad':n==='screen capture'?'screen':n==='solid color'?'solidcolor':n==='moving pattern'?'pattern':n==='mathematical'?'mathematical':n==='block corrupt'?'blockcorrupt':n==='row shift'?'rowshift':n==='pixel sort'?'pixelsort':n==='signal noise'?'signalnoise':n==='VHS'?'vhs':n==='oscillator'?'LFO':n==='archive'?'url':n==='random'?'videos':n==='text'?'text':n;
 // hover: show tip unless locked by a click
 document.addEventListener('mouseover',e=>{
   if(helperLocked) return;
