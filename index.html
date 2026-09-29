@@ -4466,16 +4466,53 @@ const ENV_SHAPES=[
   {id:'rev',   label:['reverse','']},
   {id:'ramp',  label:['ramp','up']}
 ];
+// ── modulator timing + viz helpers ──
+// modulators advance by elapsed time, scaled so one 60fps frame = 1 (they stepped a fixed amount per
+// rAF tick: 2× speed on 120Hz displays, slow under load). measured once per rendered frame, clamped to 100ms.
+let _modF=-1,_modL=-1,_modLast=0,_modK=1;
+function _modStep(){
+  if(state.frames!==_modF||state.lastFps!==_modL){
+    _modF=state.frames;_modL=state.lastFps;
+    const now=performance.now();
+    _modK=_modLast?Math.min(100,Math.max(0,now-_modLast))*0.06:1;
+    _modLast=now;
+  }
+  return _modK;
+}
+// viz canvas widths come from a ResizeObserver (reading offsetWidth right after applyLfoTarget's style
+// writes forced a layout per modulator per frame). viz draws only on ui ticks while the module is open.
+const _vizW=new WeakMap();
+const _vizRO=typeof ResizeObserver==='function'?new ResizeObserver(es=>{for(const e of es)_vizW.set(e.target,e.target.offsetWidth);}):null;
+function _vizCtx(mod,square,force){
+  if(!force&&(state.drawUi===false||!mod.open)) return null;
+  const cv=mod.cv; if(!cv) return null;
+  const w=_vizRO?(_vizW.get(cv)||0):cv.offsetWidth; if(!w) return null;
+  const h=square?w:Math.round(w*9/16);
+  if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}
+  return cv.getContext('2d');
+}
+// fixed ring buffer for scrolling viz history (was push/shift on an array, only while visible)
+const _HIST_N=1024;
+function _histPush(mod,v){const hs=mod._hist||(mod._hist={b:new Float32Array(_HIST_N),i:0,n:0});hs.b[hs.i]=v;hs.i=(hs.i+1)%_HIST_N;if(hs.n<_HIST_N)hs.n++;}
+function _histPath(ctx,mod,w,h){
+  const hs=mod._hist; if(!hs||!hs.n) return 0;
+  const n=Math.min(hs.n,w),step=w/n;
+  for(let k=0;k<n;k++){const v=hs.b[(hs.i-n+k+_HIST_N)%_HIST_N],x=k*step,y=h-(v*(h-4)+2);k===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}
+  return n;
+}
 function tickEnvelopes(){
+  const k=_modStep();
   state.modules.forEach(mod=>{
     if(mod.name!=='envelope'||mod.enabled===false) return;
     if(!mod.envPhase) mod.envPhase=0;
-    if(!mod.envTriggered) return;
-    const rate=0.01+mod.intensity*0.05;
-    mod.envPhase=Math.min(1,mod.envPhase+rate);
-    if(mod.envPhase>=1){mod.envPhase=0;mod.envTriggered=false;}
-    const val=envShape(ENV_SHAPES[mod.activeFx]?.id||'ad',mod.envPhase)*mod.param;
-    applyLfoTarget(mod,val);
+    if(mod.envTriggered){
+      const rate=0.01+mod.intensity*0.05;
+      mod.envPhase=Math.min(1,mod.envPhase+rate*k);
+      // apply the shape's end value on completion (phase 0 left perc/exp/rev at full)
+      const val=envShape(ENV_SHAPES[mod.activeFx]?.id||'ad',mod.envPhase)*mod.param;
+      if(mod.envPhase>=1){mod.envPhase=0;mod.envTriggered=false;}
+      applyLfoTarget(mod,val);
+    }
     drawEnvWaveform(mod);
   });
 }
@@ -4493,14 +4530,11 @@ function envShape(id,t){
   }
 }
 function drawEnvWaveform(mod){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const w=ctx.canvas.width,h=ctx.canvas.height,id=ENV_SHAPES[mod.activeFx]?.id||'ad';
   ctx.clearRect(0,0,w,h);
   ctx.strokeStyle='rgba(255,255,255,0.6)';ctx.lineWidth=1.5;ctx.beginPath();
-  for(let i=0;i<=w;i++){const v=envShape(ENV_SHAPES[mod.activeFx]?.id||'ad',i/w);ctx.lineTo(i,h-(v*mod.param*(h-6)+3));}
+  for(let i=0;i<=w;i++){const v=envShape(id,i/w);ctx.lineTo(i,h-(v*mod.param*(h-6)+3));}
   ctx.stroke();
   // playhead
   const px=Math.round(mod.envPhase*w);
@@ -4601,6 +4635,7 @@ const SEQ_PRESETS=[
 ];
 
 function tickSequencers(){
+  const k=_modStep();
   state.modules.forEach(mod=>{
     if(mod.name!=='sequencer'||mod.enabled===false) return;
     if(!mod.seqPhase) mod.seqPhase=0;
@@ -4609,7 +4644,7 @@ function tickSequencers(){
     if(!mod.seqPreset) mod.seqPreset=0;
     if(mod.seqStep===undefined) mod.seqStep=0;
     const rate=0.005+mod.intensity*0.1;
-    mod.seqPhase+=rate;
+    mod.seqPhase+=rate*k;
     if(mod.seqPhase>=1){
       mod.seqPhase=0;
       mod.seqStep=(mod.seqStep+1)%SEQ_STEPS;
@@ -4643,11 +4678,8 @@ function seqSavePreset(modId,idx){
 }
 
 function drawSeqViz(mod){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const cv=ctx.canvas,w=cv.width,h=cv.height;
   // black background
   ctx.fillStyle='#000';
   ctx.fillRect(0,0,w,h);
@@ -4675,17 +4707,17 @@ function drawSeqViz(mod){
     const active=i===mod.seqStep;
     ctx.fillStyle=active?cv._ditherActive:cv._ditherInactive;
     ctx.fillRect(x+gap,h-bh,sw-gap*2,bh);
-    if(!cv._seqBound){
-      cv.addEventListener('mousedown',e=>{
-        const rect=cv.getBoundingClientRect();
-        const cx=e.clientX-rect.left,cy=e.clientY-rect.top;
-        const si=Math.floor(cx/(rect.width/SEQ_STEPS));
-        const val=1-(cy/rect.height);
-        if(mod.seqSteps&&si>=0&&si<SEQ_STEPS) mod.seqSteps[si]=Math.max(0,Math.min(1,val));
-      });
-      cv._seqBound=true;
-    }
   });
+  if(!cv._seqBound){
+    cv.addEventListener('mousedown',e=>{
+      const rect=cv.getBoundingClientRect();
+      const cx=e.clientX-rect.left,cy=e.clientY-rect.top;
+      const si=Math.floor(cx/(rect.width/SEQ_STEPS));
+      const val=1-(cy/rect.height);
+      if(mod.seqSteps&&si>=0&&si<SEQ_STEPS) mod.seqSteps[si]=Math.max(0,Math.min(1,val));
+    });
+    cv._seqBound=true;
+  }
 }
 
 /* ── ASCII / HALFTONE ENGINE ── */
@@ -4920,9 +4952,9 @@ const PERLIN_FX=[
   {id:'cellular',label:['cellular',''],     param:'scale',  desc:'voronoi-like distance field'}
 ];
 
-function samplePerlin(mod){
+function samplePerlin(mod,k){
   const t=performance.now()*0.001;
-  const speed=0.05+mod.intensity*0.8;
+  const speed=(0.05+mod.intensity*0.8)*(k??1);
   const p=mod.param;
   if(!mod.pn)mod.pn={tx:0,ty:100,wx:0,wy:0,wfx:0,wfy:0};
   const pn=mod.pn;
@@ -4958,9 +4990,9 @@ function samplePerlin(mod){
       val=perlinFbm(pn.tx,pn.ty,oct,2.0,0.5)*0.5+0.5;
       break;}
     case 'warpfb':{
-      const amt=p*3+0.5;
-      pn.wfx+=perlinNoise2d(pn.wfx*0.3+t*speed*0.2,pn.wfy*0.3)*0.015*amt;
-      pn.wfy+=perlinNoise2d(pn.wfx*0.3+9.1,pn.wfy*0.3+t*speed*0.2)*0.015*amt;
+      const amt=(p*3+0.5)*(k??1),sp=0.05+mod.intensity*0.8;
+      pn.wfx+=perlinNoise2d(pn.wfx*0.3+t*sp*0.2,pn.wfy*0.3)*0.015*amt;
+      pn.wfy+=perlinNoise2d(pn.wfx*0.3+9.1,pn.wfy*0.3+t*sp*0.2)*0.015*amt;
       // soft-clamp to prevent runaway
       pn.wfx=Math.tanh(pn.wfx*0.1)*10;
       pn.wfy=Math.tanh(pn.wfy*0.1)*10;
@@ -4988,44 +5020,34 @@ function samplePerlin(mod){
 }
 
 function tickPerlin(){
+  const k=_modStep();
   state.modules.forEach(mod=>{
     if(mod.name!=='perlin'||mod.enabled===false) return;
-    const val=samplePerlin(mod);
+    const val=samplePerlin(mod,k);
     applyLfoTarget(mod,val);
+    _histPush(mod,val);
     drawPerlinViz(mod,val);
   });
 }
 
 function drawPerlinViz(mod,val){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
-  if(!mod.pnHistory)mod.pnHistory=[];
-  mod.pnHistory.push(val);
-  if(mod.pnHistory.length>w)mod.pnHistory.shift();
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const cv=ctx.canvas,w=cv.width,h=cv.height;
   ctx.clearRect(0,0,w,h);
   // filled area under curve
-  const grad=ctx.createLinearGradient(0,0,0,h);
-  grad.addColorStop(0,'rgba(255,255,255,0.25)');
-  grad.addColorStop(1,'rgba(255,255,255,0.0)');
-  ctx.fillStyle=grad;
+  if(!cv._pnGrad||cv._pnGradH!==h){
+    const grad=ctx.createLinearGradient(0,0,0,h);
+    grad.addColorStop(0,'rgba(255,255,255,0.25)');
+    grad.addColorStop(1,'rgba(255,255,255,0.0)');
+    cv._pnGrad=grad;cv._pnGradH=h;
+  }
+  ctx.fillStyle=cv._pnGrad;
   ctx.beginPath();
-  mod.pnHistory.forEach((v,i)=>{
-    const x=i*(w/mod.pnHistory.length),y=h-(v*(h-4)+2);
-    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
-  });
-  ctx.lineTo((mod.pnHistory.length-1)*(w/mod.pnHistory.length),h);
-  ctx.lineTo(0,h);
-  ctx.closePath();
-  ctx.fill();
+  const n=_histPath(ctx,mod,w,h);
+  if(n){ctx.lineTo((n-1)*(w/n),h);ctx.lineTo(0,h);ctx.closePath();ctx.fill();}
   // line
   ctx.strokeStyle='rgba(255,255,255,0.9)';ctx.lineWidth=1.5;ctx.beginPath();
-  mod.pnHistory.forEach((v,i)=>{
-    const x=i*(w/mod.pnHistory.length),y=h-(v*(h-4)+2);
-    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
-  });
+  _histPath(ctx,mod,w,h);
   ctx.stroke();
   // current dot
   const cy=h-(val*(h-4)+2);
@@ -5044,6 +5066,9 @@ const RANDWALK_FX=[
   {id:'brownian',label:['brownian',''],     param:'range'}
 ];
 function tickRandomWalks(){
+  // continuous-time form of the old per-frame step (identical at k=1): kicks scale with sqrt(k),
+  // damping with pow(d,k), drift with k
+  const k=_modStep(),kr=Math.sqrt(k);
   state.modules.forEach(mod=>{
     if(mod.name!=='randwalk'||mod.enabled===false) return;
     if(mod.rwVal===undefined) mod.rwVal=0.5;
@@ -5051,84 +5076,80 @@ function tickRandomWalks(){
     const fx=RANDWALK_FX[mod.activeFx];
     const speed=0.001+mod.intensity*0.02;
     const range=mod.param;
+    let dx=null;
     switch(fx?.id){
       case 'slow':
-        mod.rwVel+=(Math.random()-0.5)*speed*0.3;
-        mod.rwVel*=0.97;
+        mod.rwVel+=(Math.random()-0.5)*speed*0.3*kr;
+        mod.rwVel*=Math.pow(0.97,k);
         break;
       case 'medium':
-        mod.rwVel+=(Math.random()-0.5)*speed;
-        mod.rwVel*=0.95;
+        mod.rwVel+=(Math.random()-0.5)*speed*kr;
+        mod.rwVel*=Math.pow(0.95,k);
         break;
       case 'fast':
-        mod.rwVel+=(Math.random()-0.5)*speed*3;
-        mod.rwVel*=0.9;
+        mod.rwVel+=(Math.random()-0.5)*speed*3*kr;
+        mod.rwVel*=Math.pow(0.9,k);
         break;
       case 'stepped':
-        if(!mod.rwStepTimer) mod.rwStepTimer=0;
-        mod.rwStepTimer++;
+        mod.rwStepTimer=(mod.rwStepTimer||0)+k;
         if(mod.rwStepTimer>Math.round(20/mod.intensity)){
           mod.rwVal=Math.random()*range+(0.5-range/2);
           mod.rwStepTimer=0;
         }
         applyLfoTarget(mod,Math.max(0,Math.min(1,mod.rwVal)));
+        _histPush(mod,mod.rwVal);
         drawRandWalkViz(mod);
         return;
       case 'drunk':
-        mod.rwVel=(Math.random()-0.5)*speed*4;
+        mod.rwVel=(Math.random()-0.5)*speed*4;dx=mod.rwVel*kr;
         break;
       case 'pendulum':{
-        if(!mod.rwAngle) mod.rwAngle=0;
-        mod.rwAngle+=speed*8;
+        mod.rwAngle=(mod.rwAngle||0)+speed*8*k;
         mod.rwVal=0.5+Math.sin(mod.rwAngle)*range*0.5;
         applyLfoTarget(mod,Math.max(0,Math.min(1,mod.rwVal)));
+        _histPush(mod,mod.rwVal);
         drawRandWalkViz(mod);
         return;}
       case 'gravity':{
         const center=mod.param;
-        mod.rwVel+=(center-mod.rwVal)*0.05+(Math.random()-0.5)*speed*2;
-        mod.rwVel*=0.92;
+        mod.rwVel+=(center-mod.rwVal)*0.05*k+(Math.random()-0.5)*speed*2*kr;
+        mod.rwVel*=Math.pow(0.92,k);
         break;}
       case 'brownian':
-        mod.rwVel=(Math.random()-0.5)*speed*2;
+        mod.rwVel=(Math.random()-0.5)*speed*2;dx=mod.rwVel*kr;
         break;
     }
-    mod.rwVal=Math.max(0,Math.min(1,mod.rwVal+mod.rwVel));
+    mod.rwVal=Math.max(0,Math.min(1,mod.rwVal+(dx??mod.rwVel*k)));
     // soft bounce at boundaries
     if(mod.rwVal<=0||mod.rwVal>=1) mod.rwVel*=-0.8;
     applyLfoTarget(mod,mod.rwVal);
+    _histPush(mod,mod.rwVal);
     drawRandWalkViz(mod);
   });
 }
 function drawRandWalkViz(mod){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
-  if(!mod.rwHistory) mod.rwHistory=[];
-  mod.rwHistory.push(mod.rwVal||0.5);
-  if(mod.rwHistory.length>w) mod.rwHistory.shift();
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const w=ctx.canvas.width,h=ctx.canvas.height;
   ctx.clearRect(0,0,w,h);
   ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=1.5;ctx.beginPath();
-  mod.rwHistory.forEach((v,i)=>{
-    const x=i*(w/mod.rwHistory.length),y=h-(v*(h-4)+2);
-    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
-  });
+  _histPath(ctx,mod,w,h);
   ctx.stroke();
   // current dot
-  const cy=h-((mod.rwVal||0.5)*(h-4)+2);
+  const cy=h-((mod.rwVal??0.5)*(h-4)+2);
   ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(w-2,cy,3,0,Math.PI*2);ctx.fill();
 }
 
 /* ── XY PAD ENGINE ── */
 function tickXYPads(){
+  _modStep();
   // XY pad values applied continuously if they have targets
   state.modules.forEach(mod=>{
     if(mod.name!=='xypad'||mod.enabled===false) return;
     if(mod.xyX===undefined){mod.xyX=0.5;mod.xyY=0.5;}
     if(mod.xyTargetX) applyLfoTargetNamed(mod.xyTargetX,mod.xyX*mod.param);
     if(mod.xyTargetY) applyLfoTargetNamed(mod.xyTargetY,(1-mod.xyY)*mod.param);
+    // redraw on ui ticks: renderFrame paints the chain thumbnail into every module canvas
+    drawXYViz(mod);
   });
 }
 function applyLfoTargetNamed(target,val){
@@ -5138,8 +5159,13 @@ function applyLfoTargetNamed(target,val){
   const tmod=state.modules.find(m=>m.id===targetId);
   if(!tmod) return;
   if(targetKnob==='r'||targetKnob==='g'||targetKnob==='b'){if(!tmod.channelGain)tmod.channelGain={r:1,g:1,b:1};tmod.channelGain[targetKnob]=val;return;}
-  const k=targetKnob==='intensity'?'int':'par';
-  if(targetKnob==='intensity')tmod.intensity=val; else tmod.param=val;
+  const isInt=targetKnob==='intensity';
+  if(isInt)tmod.intensity=val; else tmod.param=val;
+  // touch the knob dom only when the shown value moves (was 3 style writes per modulator per frame)
+  const q=Math.round(val*1000),qk=isInt?'_uiInt':'_uiPar';
+  if(tmod[qk]===q) return;
+  tmod[qk]=q;
+  const k=isInt?'int':'par';
   const el=document.getElementById(k+'-val-'+targetId);const fill=document.getElementById(k+'-fill-'+targetId);const thumb=document.getElementById(k+'-thumb-'+targetId);
   if(el)el.textContent=Math.round(val*100)+'%';if(fill)fill.style.width=(val*100)+'%';if(thumb)thumb.style.left=(val*100)+'%';
 }
@@ -5149,14 +5175,6 @@ function buildXYRouting(modId){
   const container=document.getElementById('xy-routing-'+modId); if(!container) return;
   const idx=state.modules.findIndex(m=>m.id===modId);
   const upstream=idx>0?state.modules[idx-1]:null;
-  let opts=`<option value="">— none —</option><option value="xfade">MIXER — crossfade</option>`;
-  if(upstream&&!['LFO','envelope','audio','sequencer','xypad','perlin','randwalk'].includes(upstream.name)){
-    opts+=`<option value="${upstream.id}__intensity">${upstream.name.toUpperCase()} — intensity</option>`;
-    opts+=`<option value="${upstream.id}__param">${upstream.name.toUpperCase()} — parameters</option>`;
-    opts+=`<option value="${upstream.id}__r">${upstream.name.toUpperCase()} — red</option>`;
-    opts+=`<option value="${upstream.id}__g">${upstream.name.toUpperCase()} — green</option>`;
-    opts+=`<option value="${upstream.id}__b">${upstream.name.toUpperCase()} — blue</option>`;
-  }
   const curX=mod.xyTargetX,curY=mod.xyTargetY;
   const xVal=curX?(curX.targetId==='xfade'?'xfade':curX.targetId+'__'+curX.targetKnob):'';
   const yVal=curY?(curY.targetId==='xfade'?'xfade':curY.targetId+'__'+curY.targetKnob):'';
@@ -5191,7 +5209,7 @@ function buildXYRouting(modId){
       const rect=cv.getBoundingClientRect();
       mod.xyX=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));
       mod.xyY=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height));
-      drawXYViz(mod);
+      drawXYViz(mod,true);
     };
     // document listeners live only for the drag (were added on every rebuild, never removed)
     cv.addEventListener('mousedown',e=>{
@@ -5214,36 +5232,21 @@ function assignXYCustom(modId,axis){
   setStatus('XY '+axis.toUpperCase()+' assigned');
 }
 
-function assignXY(modId,axis){
-  const mod=state.modules.find(m=>m.id===modId); if(!mod) return;
-  const sel=document.getElementById(`xy-sel-${axis}-${modId}`); if(!sel) return;
-  const val=sel.value;
-  if(!val){if(axis==='x')mod.xyTargetX=null;else mod.xyTargetY=null;return;}
-  const target=val==='xfade'?{targetId:'xfade',targetKnob:'xfade'}:(()=>{const p=val.split('__');return{targetId:p[0],targetKnob:p[1]||'intensity'};})();
-  if(axis==='x') mod.xyTargetX=target; else mod.xyTargetY=target;
-  setStatus('XY '+axis.toUpperCase()+' → '+sel.options[sel.selectedIndex].text);
-}
-
-function drawXYViz(mod){
-  const cv=document.getElementById('cv-'+mod.id); if(!cv||!cv.offsetWidth) return;
-  const s=cv.offsetWidth;
-  if(cv.width!==s){cv.width=s;cv.height=s;}
-  const ctx=cv.getContext('2d');
+function drawXYViz(mod,force){
+  const ctx=_vizCtx(mod,true,force); if(!ctx) return;
+  const s=ctx.canvas.width;
   ctx.clearRect(0,0,s,s);
   ctx.fillStyle='#fff';ctx.fillRect(0,0,s,s);
-  const x=(mod.xyX||0.5)*s, y=(mod.xyY||0.5)*s;
+  const x=(mod.xyX??0.5)*s, y=(mod.xyY??0.5)*s;
   // crosshair lines
   ctx.strokeStyle='rgba(0,0,0,0.12)';ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,s);ctx.stroke();
   ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(s,y);ctx.stroke();
   // X axis bar — dithered black
-  ctx.save();
-  for(let px=0;px<x;px+=4){if((px/4)%2===0){ctx.fillStyle='rgba(0,0,0,0.35)';ctx.fillRect(px,s-4,2,2);ctx.fillRect(px+2,s-2,2,2);}}
-  ctx.restore();
+  ctx.fillStyle='rgba(0,0,0,0.35)';
+  for(let px=0;px<x;px+=4){if((px/4)%2===0){ctx.fillRect(px,s-4,2,2);ctx.fillRect(px+2,s-2,2,2);}}
   // Y axis bar — dithered black
-  ctx.save();
-  for(let py=0;py<y;py+=4){if((py/4)%2===0){ctx.fillStyle='rgba(0,0,0,0.35)';ctx.fillRect(0,py,2,2);ctx.fillRect(2,py+2,2,2);}}
-  ctx.restore();
+  for(let py=0;py<y;py+=4){if((py/4)%2===0){ctx.fillRect(0,py,2,2);ctx.fillRect(2,py+2,2,2);}}
   // dot
   ctx.fillStyle='#000';ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();
 }
@@ -5260,86 +5263,71 @@ const LFO_SHAPES=[
   {id:'burst',   label:['burst','']}
 ];
 
-function lfoWave(shape, phase, mod){
+// random shapes are a pure function of (cycle, phase) so the viz can draw ahead without touching state
+// (the viz called the stateful generator w+1 times per frame, re-rolling rstep and corrupting smooth)
+function _hash01(n){n|=0;n=Math.imul(n^(n>>>16),0x45d9f3b);n=Math.imul(n^(n>>>16),0x45d9f3b);n^=n>>>16;return (n>>>0)/4294967296;}
+function _lfoSeed(mod){return mod._lfoSeed??(mod._lfoSeed=(Math.random()*0x7fffffff)|0);}
+function _lfoSmoothTarget(mod,cyc){return cyc===0?0.5:_hash01(_lfoSeed(mod)+cyc*7919+13);}
+function lfoWave(shape, phase, mod, cyc){
   switch(shape){
     case 'sine':     return (Math.sin(phase*Math.PI*2)+1)/2;
     case 'square':   return phase<0.5?1:0;
     case 'saw':      return phase;
     case 'rsaw':     return 1-phase;
     case 'triangle': return phase<0.5?phase*2:2-phase*2;
-    case 'rstep':
-      if(!mod._lfoRstep||Math.floor(phase*8)!==mod._lfoRstepLast){
-        mod._lfoRstep=Math.random();
-        mod._lfoRstepLast=Math.floor(phase*8);
-      }
-      return mod._lfoRstep;
-    case 'smooth':
-      if(!mod._lfoSmooth) mod._lfoSmooth={v:0.5,t:0.5,s:0};
-      if(phase<mod._lfoSmooth.s) mod._lfoSmooth.t=Math.random();
-      mod._lfoSmooth.s=phase;
-      mod._lfoSmooth.v+=(mod._lfoSmooth.t-mod._lfoSmooth.v)*0.05;
-      return mod._lfoSmooth.v;
+    case 'rstep':    return _hash01(_lfoSeed(mod)+(cyc??mod._lfoCyc??0)*8+Math.floor(phase*8));
+    case 'smooth':   return mod._lfoSmooth?mod._lfoSmooth.v:0.5; // advanced in tickLFOs
     case 'burst':    return Math.pow(Math.sin(phase*Math.PI),8);
     default:         return (Math.sin(phase*Math.PI*2)+1)/2;
   }
 }
 
 function tickLFOs(){
+  const k=_modStep();
   state.modules.forEach(mod=>{
     if(mod.name!=='LFO'||mod.enabled===false) return;
     if(!mod.lfoPhase) mod.lfoPhase=0;
     const rate=0.02+mod.intensity*3;
-    mod.lfoPhase=(mod.lfoPhase+rate/60)%1;
-    const raw=lfoWave(LFO_SHAPES[mod.activeFx]?.id||'sine',mod.lfoPhase,mod);
+    const shape=LFO_SHAPES[mod.activeFx]?.id||'sine';
+    const ph=mod.lfoPhase+rate/60*k;
+    if(ph>=1) mod._lfoCyc=(mod._lfoCyc||0)+Math.floor(ph);
+    mod.lfoPhase=ph%1;
+    if(shape==='smooth'){const sm=mod._lfoSmooth||(mod._lfoSmooth={v:0.5});sm.v+=(_lfoSmoothTarget(mod,mod._lfoCyc||0)-sm.v)*(1-Math.pow(0.95,k));}
+    const raw=lfoWave(shape,mod.lfoPhase,mod);
     applyLfoTarget(mod,raw*mod.param);
-    // draw waveform visualizer
-    const cv=document.getElementById('cv-'+mod.id);
-    if(cv&&cv.offsetWidth){
-      const w=cv.offsetWidth,h=Math.round(cv.offsetWidth*9/16);
-      if(cv.width!==w){cv.width=w;cv.height=h;}
-      const ctx=cv.getContext('2d');
-      ctx.clearRect(0,0,w,h);
-      // draw full wave
-      ctx.strokeStyle='rgba(255,255,255,0.6)';
-      ctx.lineWidth=1.5;
-      ctx.beginPath();
-      for(let i=0;i<=w;i++){
-        const ph=(mod.lfoPhase+i/w)%1;
-        const v=lfoWave(LFO_SHAPES[mod.activeFx]?.id||'sine',ph,mod);
-        const y=h-(v*mod.param*(h-6)+3);
-        i===0?ctx.moveTo(i,y):ctx.lineTo(i,y);
-      }
-      ctx.stroke();
-      // current position dot
-      const curY=h-((raw*mod.param)*(h-6)+3);
-      ctx.fillStyle='#fff';
-      ctx.beginPath();
-      ctx.arc(0,curY,3,0,Math.PI*2);
-      ctx.fill();
-    }
+    drawLfoViz(mod,shape,raw,rate);
   });
+}
+function drawLfoViz(mod,shape,raw,rate){
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const w=ctx.canvas.width,h=ctx.canvas.height,cyc=mod._lfoCyc||0;
+  ctx.clearRect(0,0,w,h);
+  // draw one full cycle ahead of the current phase
+  ctx.strokeStyle='rgba(255,255,255,0.6)';
+  ctx.lineWidth=1.5;
+  ctx.beginPath();
+  // smooth: run the follower forward on a local copy, at the real per-frame rate
+  let sv=mod._lfoSmooth?mod._lfoSmooth.v:0.5;
+  const coef=1-Math.pow(0.95,60/(rate*w));
+  for(let i=0;i<=w;i++){
+    const p=mod.lfoPhase+i/w,c=cyc+Math.floor(p);
+    let v;
+    if(shape==='smooth'){if(i>0)sv+=(_lfoSmoothTarget(mod,c)-sv)*coef;v=sv;}
+    else v=lfoWave(shape,p%1,mod,c);
+    const y=h-(v*mod.param*(h-6)+3);
+    i===0?ctx.moveTo(i,y):ctx.lineTo(i,y);
+  }
+  ctx.stroke();
+  // current position dot
+  const curY=h-((raw*mod.param)*(h-6)+3);
+  ctx.fillStyle='#fff';
+  ctx.beginPath();
+  ctx.arc(0,curY,3,0,Math.PI*2);
+  ctx.fill();
 }
 
 function applyLfoTarget(mod,val){
-  if(!mod.lfoTarget) return;
-  const{targetId,targetKnob}=mod.lfoTarget;
-  if(targetId==='xfade'){setXfade(Math.round(val*100),true);return;}
-  const target=state.modules.find(m=>m.id===targetId);
-  if(!target) return;
-  if(targetKnob==='r'||targetKnob==='g'||targetKnob==='b'){
-    if(!target.channelGain) target.channelGain={r:1,g:1,b:1};
-    target.channelGain[targetKnob]=val;
-    return;
-  }
-  const k=targetKnob==='intensity'?'int':'par';
-  if(targetKnob==='intensity') target.intensity=val;
-  else target.param=val;
-  const el=document.getElementById(k+'-val-'+targetId);
-  const fill=document.getElementById(k+'-fill-'+targetId);
-  const thumb=document.getElementById(k+'-thumb-'+targetId);
-  if(el) el.textContent=Math.round(val*100)+'%';
-  if(fill) fill.style.width=(val*100)+'%';
-  if(thumb) thumb.style.left=(val*100)+'%';
+  if(mod.lfoTarget) applyLfoTargetNamed(mod.lfoTarget,val);
 }
 
 function buildLfoRouting(modId){
@@ -5347,14 +5335,6 @@ function buildLfoRouting(modId){
   const container=document.getElementById('lfo-routing-'+modId); if(!container) return;
   const idx=state.modules.findIndex(m=>m.id===modId);
   const upstream=idx>0?state.modules[idx-1]:null;
-  let opts=`<option value="">— pick a target —</option><option value="xfade">MIXER — crossfade</option>`;
-  if(upstream&&!['LFO','envelope','audio','sequencer','perlin','randwalk'].includes(upstream.name)){
-    opts+=`<option value="${upstream.id}__intensity">${upstream.name.toUpperCase()} — intensity</option>`;
-    opts+=`<option value="${upstream.id}__param">${upstream.name.toUpperCase()} — parameters</option>`;
-    opts+=`<option value="${upstream.id}__r">${upstream.name.toUpperCase()} — red</option>`;
-    opts+=`<option value="${upstream.id}__g">${upstream.name.toUpperCase()} — green</option>`;
-    opts+=`<option value="${upstream.id}__b">${upstream.name.toUpperCase()} — blue</option>`;
-  }
   const current=mod.lfoTarget;
   const curVal=current?(current.targetId==='xfade'?'xfade':current.targetId+'__'+current.targetKnob):'';
   const isAssigned=!!current&&!!curVal;
@@ -5397,17 +5377,6 @@ function assignLfoCustom(modId){
   else{const parts=val.split('__');mod.lfoTarget={targetId:parts[0],targetKnob:parts[1]||'intensity'};}
   buildLfoRouting(modId);
   setStatus('LFO assigned');
-}
-
-function assignLfo(modId){
-  const mod=state.modules.find(m=>m.id===modId); if(!mod) return;
-  const sel=document.getElementById('lfo-sel-'+modId); if(!sel) return;
-  const val=sel.value;
-  if(!val){mod.lfoTarget=null; buildLfoRouting(modId); return;}
-  if(val==='xfade'){mod.lfoTarget={targetId:'xfade',targetKnob:'xfade'};}
-  else{const parts=val.split('__');mod.lfoTarget={targetId:parts[0],targetKnob:parts[1]||'intensity'};}
-  buildLfoRouting(modId);
-  setStatus('LFO assigned to '+sel.options[sel.selectedIndex].text);
 }
 
 /* ── GLITCH MODULES ── */
@@ -6119,7 +6088,7 @@ function setFx(modId,fxIdx){
   const mod=state.modules.find(m=>m.id===modId); if(!mod) return;
   mod.activeFx=fxIdx;
   if(mod.name==='geometry') mod.geomAngle=0;
-  if(mod.name==='LFO'){ mod.lfoPhase=0; delete mod._lfoRstep; delete mod._lfoSmooth; }
+  if(mod.name==='LFO'){ mod.lfoPhase=0; mod._lfoCyc=0; delete mod._lfoSmooth; }
   if(mod.name==='feedback'){ mod.fbPrev=null; mod.fbMirrorX=0; mod.fbFrame=0; }
   _fxKeysOf('fxkeys-'+modId).forEach((k,i)=>k.classList.toggle('active',i===fxIdx));
   const lbl=document.getElementById('param-lbl-'+modId);
@@ -6146,6 +6115,7 @@ function makeKnobDrag(modId,which){
       const r=track.getBoundingClientRect();
       const v=Math.max(0,Math.min(1,+(((ev.clientX-r.left)/r.width).toFixed(2))));
       const mod=state.modules.find(m=>m.id===modId); if(!mod)return;
+      mod._uiInt=mod._uiPar=undefined; // let modulation rewrite the knob dom after a manual drag
       if(which==='int'){mod.intensity=v; const el=document.getElementById('int-val-'+modId); if(el)el.textContent=Math.round(v*100)+'%';}
       else{mod.param=v; const el=document.getElementById('par-val-'+modId); if(el)el.textContent=Math.round(v*100)+'%';}
       const fill=document.getElementById(which+'-fill-'+modId);
@@ -6301,6 +6271,7 @@ function buildModuleHTML(mod){
 
 function rebuildSlots(){
   const container=document.getElementById('mod-slots');
+  if(_vizRO) _vizRO.disconnect();
   container.innerHTML='';
   state.modules.forEach(mod=>{
     const conn=document.createElement('div');
@@ -6320,6 +6291,7 @@ function rebuildSlots(){
     const _isXYPad=mod.name==='xypad';
     const _isSeq=mod.name==='sequencer';
     const _isModulator=['LFO','envelope','audio','sequencer','xypad','perlin','randwalk'].includes(mod.name);
+    if(_isModulator&&_vizRO&&mod.cv) _vizRO.observe(mod.cv);
     if(_isModulator&&!_isXYPad) buildLfoRouting(mod.id);
     if(_isXYPad) buildXYRouting(mod.id);
     if(_isSeq) setTimeout(()=>drawSeqViz(mod),50);
