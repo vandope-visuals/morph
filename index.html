@@ -7000,6 +7000,14 @@ function launchSequence(){
   const title=document.getElementById('boot-title');
   const GLITCH='▓▒░█▄▀■□▪▫╬╪╫╥╤╦╗╔╝╚┼┤├┬┴─│';
   const rnd=()=>GLITCH[Math.floor(Math.random()*GLITCH.length)];
+  // Enter on the focused button dismisses via the keydown handler and then
+  // still clicks it — don't start a sequence on a dismissed (or running) boot
+  if(!overlay||overlay.classList.contains('dismissed')||window._launchTos) return;
+  // every phase timeout / interval is tracked so an early dismiss can stop
+  // the launch screen (pointer-events:all) from reappearing over the app
+  const _to=(fn,ms)=>{const id=setTimeout(fn,ms);window._launchTos.push(id);return id;};
+  const _iv=(fn,ms)=>{const id=setInterval(fn,ms);if(window._launchIvs)window._launchIvs.push(id);return id;};
+  window._launchTos=[];
 
   // lock button
   const btn=document.querySelector('.boot-btn-main');
@@ -7045,7 +7053,7 @@ function launchSequence(){
   window._launchIvs=[flashIv,scrambleIv,bandIv];
 
   // Phase 2: blackout at 1800ms
-  setTimeout(()=>{
+  _to(()=>{
     clearInterval(flashIv);
     clearInterval(scrambleIv);
     clearInterval(bandIv);
@@ -7062,7 +7070,7 @@ function launchSequence(){
   },1800);
 
   // Phase 3: boot screen at 2000ms
-  setTimeout(()=>{
+  _to(()=>{
     const screen=document.getElementById('boot-launch-screen');
     const linesEl=document.getElementById('boot-launch-lines');
     const progressWrap=document.getElementById('boot-progress-wrap');
@@ -7090,7 +7098,7 @@ function launchSequence(){
       const len=finalText.length;
       let frame=0;
       const totalFrames=18;
-      const iv=setInterval(()=>{
+      const iv=_iv(()=>{
         frame++;
         const revealed=Math.floor((frame/totalFrames)*len);
         let out='';
@@ -7135,11 +7143,11 @@ function launchSequence(){
   },2000);
 
   // Phase 4: glitch out at 3000ms then reveal app
-  setTimeout(()=>{
+  _to(()=>{
     const screen=document.getElementById('boot-launch-screen');
 
     let flicks=0;
-    const flickIv=setInterval(()=>{
+    const flickIv=_iv(()=>{
       screen.style.opacity=flicks%2===0?'0':'1';
       if(++flicks>6){
         clearInterval(flickIv);
@@ -7168,6 +7176,10 @@ function dismissBoot(){
   ov.classList.add('dismissed');
   if(window._fontMorpherCleanup){window._fontMorpherCleanup();window._fontMorpherCleanup=null;}
   if(window._launchIvs){window._launchIvs.forEach(iv=>clearInterval(iv));window._launchIvs=null;}
+  if(window._launchTos){window._launchTos.forEach(t=>clearTimeout(t));window._launchTos=null;}
+  // early exit (Enter/Escape) mid-sequence: the launch screen must not stay up
+  const ls=document.getElementById('boot-launch-screen');
+  if(ls){ls.classList.remove('visible');ls.style.opacity='0';ls.style.pointerEvents='none';}
   setTimeout(()=>{try{ov.remove();}catch(e){ov.style.display='none';}},320);
 }
 window.dismissBoot=dismissBoot;
