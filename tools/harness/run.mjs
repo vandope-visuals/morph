@@ -2,8 +2,11 @@
 //
 //   node run.mjs                     smoke + bench + screenshots → results/latest.json
 //   node run.mjs --only smoke        (smoke | bench | shots, comma separated)
-//   node run.mjs --baseline results/baseline.json   compare against a previous run
-//   node run.mjs --save-baseline     also write results/baseline.json (+ baseline shots)
+//   node run.mjs --baseline other.json   compare bench against another run (default: baseline/bench.json)
+//   node run.mjs --save-baseline     overwrite baseline/ with this run (bench.json and/or shots/)
+//
+// baseline/bench.json = original v1.5 numbers (M1, Chromium, ANGLE Metal). Keep it as the
+// reference; only re-save shots when a visual change is intentional.
 //
 // Depends on these globals staying reachable from page scope (update here if renamed):
 //   renderFrame, MODULE_PROCESSORS, addModule, removeModule, pickSource, sources, state,
@@ -27,7 +30,8 @@ const args = process.argv.slice(2);
 const flag = (n) => args.includes(n);
 const opt = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null; };
 const only = (opt('--only') || 'smoke,bench,shots').split(',');
-const baselinePath = opt('--baseline');
+const BASELINE = path.join(HERE, 'baseline');
+const baselinePath = opt('--baseline') || path.join(BASELINE, 'bench.json');
 const saveBaseline = flag('--save-baseline');
 const headed = flag('--headed');
 
@@ -310,7 +314,7 @@ if (only.includes('bench')) {
 // ───────────────────────── SCREENSHOTS ─────────────────────────
 if (only.includes('shots')) {
   const shotDir = path.join(RESULTS, 'shots');
-  const baseDir = path.join(RESULTS, 'shots-baseline');
+  const baseDir = path.join(BASELINE, 'shots');
   fs.mkdirSync(shotDir, { recursive: true });
   const { page } = await bootApp(context);
   await page.evaluate(PAGE_HELPERS);
@@ -354,7 +358,7 @@ await browser.close();
 server.close();
 
 fs.writeFileSync(path.join(RESULTS, 'latest.json'), JSON.stringify(results, null, 2));
-if (saveBaseline) fs.writeFileSync(path.join(RESULTS, 'baseline.json'), JSON.stringify(results, null, 2));
+if (saveBaseline && only.includes('bench')) { fs.mkdirSync(BASELINE, { recursive: true }); fs.writeFileSync(path.join(BASELINE, 'bench.json'), JSON.stringify(results, null, 2)); }
 
 // ── report ──
 const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : String(v));

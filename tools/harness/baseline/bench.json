@@ -1,0 +1,19 @@
+{
+  "when": "2026-09-29T23:23:33.378Z",
+  "smoke": {},
+  "bench": {},
+  "shots": {
+    "dark+crt": {
+      "file": "results/shots/dark+crt.png"
+    },
+    "dark": {
+      "file": "results/shots/dark.png"
+    },
+    "light": {
+      "file": "results/shots/light.png"
+    },
+    "light+crt": {
+      "file": "results/shots/light+crt.png"
+    }
+  }
+}
