@@ -2715,6 +2715,14 @@ function drawEmptySourceB(cv){
    CPU fallback only for stateful cross-frame effects.
    ═══════════════════════════════════════════════════════════════ */
 /* ── CUSTOM SELECT HELPER ── */
+// one shared outside-click closer for every custom select (was one document listener per build, never removed)
+let _cselBound=false;
+function _cselBindOutside(){
+  if(_cselBound) return; _cselBound=true;
+  document.addEventListener('click', e=>{
+    document.querySelectorAll('.csel-dropdown.open').forEach(dd=>{ if(!dd.contains(e.target)) dd.classList.remove('open'); });
+  });
+}
 function buildCustomSelect(id, opts, currentVal, onChange){
   const wrap = document.createElement('div');
   wrap.className = 'csel-wrap';
@@ -2777,11 +2785,7 @@ function buildCustomSelect(id, opts, currentVal, onChange){
     }
   });
 
-  document.addEventListener('click', e=>{
-    if(!dd.contains(e.target) && e.target!==btn){
-      dd.classList.remove('open');
-    }
-  });
+  _cselBindOutside();
 
   wrap.dataset.value = currentVal || '';
   wrap.appendChild(btn);
@@ -5187,9 +5191,13 @@ function buildXYRouting(modId){
       mod.xyY=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height));
       drawXYViz(mod);
     };
-    cv.addEventListener('mousedown',e=>{cv._xyDrag=true;update(e);});
-    document.addEventListener('mousemove',e=>{if(cv._xyDrag)update(e);});
-    document.addEventListener('mouseup',()=>{cv._xyDrag=false;});
+    // document listeners live only for the drag (were added on every rebuild, never removed)
+    cv.addEventListener('mousedown',e=>{
+      update(e);
+      const up=()=>{document.removeEventListener('mousemove',update);document.removeEventListener('mouseup',up);};
+      document.addEventListener('mousemove',update);
+      document.addEventListener('mouseup',up);
+    });
   }
   drawXYViz(mod);
 }
