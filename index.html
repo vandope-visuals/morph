@@ -8134,9 +8134,9 @@ async function loadArchiveVideo(src,slot,url,tok){
   },4000);
   setStatus(_shuffled[0]);_msgIdx=1;
 
-  // Set type immediately so getSourceCanvas routes correctly when video fires canplay
-  src.type='url';
-
+  // the slot keeps playing its current source until this video is ready;
+  // only then is the old one released (a failed/cancelled load used to
+  // leave the slot half-cleared, or black)
   const vid=makeVideoEl();
   // Route through our Cloudflare Worker proxy which adds Access-Control-Allow-Origin: *
   // This solves the archive.org CDN redirect dropping CORS headers.
@@ -8144,20 +8144,26 @@ async function loadArchiveVideo(src,slot,url,tok){
   vid.crossOrigin='anonymous';
   vid.loop=true;
   vid.addEventListener('ended',()=>{vid.currentTime=0;vid.play().catch(()=>{});});
-  src.vidEl=vid;
-  src.vid2El=null;
   const _proxiedUrl=_PROXY+encodeURIComponent(url);
   vid.src=_proxiedUrl;vid.load();vid.play().catch(()=>{});
 
   // mark slot active only once video is actually ready
-  let _activated=false;
+  let _activated=false,_done=false;
   let _watchdog=null; // declared before _onReady to avoid TDZ
-  function _onReady(){
-    if(_activated) return;
-    _activated=true;
-    clearInterval(_msgIv);
+  function _finish(){
+    _done=true;
+    clearInterval(_msgIv);clearInterval(_watchdog);
     setStatus._noReset=false;
-    if(_watchdog) clearInterval(_watchdog);
+  }
+  function _dropVid(){vid.pause();vid.removeAttribute('src');try{vid.load();}catch(e){}vid.remove();}
+  function _onReady(){
+    if(_activated||_done) return;
+    // something else was loaded into this slot meanwhile — discard quietly
+    if(_loadTok[slot]!==tok){_finish();_dropVid();_removeOverlay();return;}
+    _activated=true;
+    _finish();
+    _commitSource(slot);
+    src.type='url';src.vidEl=vid;src.vid2El=null;
     src.active=true;src.label='archive';
     updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
     _removeOverlay();
@@ -8169,58 +8175,48 @@ async function loadArchiveVideo(src,slot,url,tok){
   // recover from stalls — archive.org range requests can fail mid-stream
   vid.addEventListener('stalled',()=>{
     if(!_activated) return;
-    setTimeout(()=>{ if(vid.paused||vid.readyState<2){ vid.load(); vid.play().catch(()=>{}); } },1000);
+    setTimeout(()=>{ if(src.vidEl===vid&&(vid.paused||vid.readyState<2)){ vid.load(); vid.play().catch(()=>{}); } },1000);
   });
   vid.addEventListener('waiting',()=>{
     if(!_activated) return;
-    setTimeout(()=>{ if(vid.paused){ vid.play().catch(()=>{}); } },500);
+    setTimeout(()=>{ if(src.vidEl===vid&&vid.paused){ vid.play().catch(()=>{}); } },500);
   });
 
   // watchdog — check every 2s, give up at 30s
   let _waited=0;
   _watchdog=setInterval(()=>{
     _waited+=2;
+    if(_loadTok[slot]!==tok){_finish();_dropVid();_removeOverlay();return;}
     if(vid.readyState>=2||vid.videoWidth>0){
       _onReady();
       return;
     }
     if(_waited>=30){
-      clearInterval(_watchdog);
-      clearInterval(_msgIv);
-      setStatus._noReset=false;
+      // tear the hidden video down (it kept downloading and a late canplay
+      // activated a half-cleared slot); the previous source stays untouched
+      _finish();
+      _dropVid();
       _showOverlayError('archive.org is currently down.','please pick another source.');
-      src.active=false;
-      src.type=null;
-      updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
-      setStatus._cap=false;
+      updateSourcePickState();
       setStatus('archive.org is down — pick another source');
-      setStatus._cap=true;
     }
   },2000);
-
-  src.label='loading…';
-  updateSrcNodeControls(slot);
 }
 
 /* ── ARCHIVE.ORG RESOLVER ── */
 /* ── VIDEOS BROWSER ── */
-const _VB_PROXIES=[
-  u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
-  u=>'https://corsproxy.io/?'+encodeURIComponent(u),
-  u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u),
-];
-
+// archive.org's advancedsearch and metadata APIs send
+// Access-Control-Allow-Origin: * — fetch them directly. (the old fallbacks
+// sent user URLs through allorigins / corsproxy.io / codetabs)
+const _sig=ms=>(typeof AbortSignal!=='undefined'&&AbortSignal.timeout)?AbortSignal.timeout(ms):undefined;
 async function _vbFetch(url){
-  // archive.org search API supports CORS — try direct first
-  try{const r=await fetch(url,{signal:AbortSignal.timeout(8000)});if(r.ok) return await r.json();}catch(e){}
-  // fall back to proxies
-  for(const pf of _VB_PROXIES){
-    try{const r=await fetch(pf(url),{signal:AbortSignal.timeout(8000)});if(r.ok) return await r.json();}catch(e){}
-  }
-  throw new Error('all proxies failed');
+  const r=await fetch(url,{signal:_sig(8000)});
+  if(!r.ok) throw new Error('archive.org search failed ('+r.status+')');
+  return await r.json();
 }
 
-function openVideosBrowser(slot,src){
+function openVideosBrowser(slot,src,tok){
+  if(tok===undefined) tok=_loadTok[slot];
   const isDark=document.body.classList.contains('dark');
   const modal=document.createElement('div');
   modal.id='vb-modal';
@@ -8255,18 +8251,20 @@ function openVideosBrowser(slot,src){
 
   const statusEl=modal.querySelector('#vb-status');
   const resultsEl=modal.querySelector('#vb-results');
-  let _loading=false;
+  let _loading=false,_closed=false;
   function setVBStatus(msg){ statusEl.textContent=msg; }
 
+  function escVB(e){ if(e.key==='Escape') close(); }
   function close(){
+    if(_closed) return;
+    _closed=true;
+    document.removeEventListener('keydown',escVB);
     modal.remove();
     if(!src.active) updateSourcePickState();
   }
 
   modal.querySelector('#vb-close').onclick=close;
-  document.addEventListener('keydown',function escVB(e){
-    if(e.key==='Escape'){close();document.removeEventListener('keydown',escVB);}
-  });
+  document.addEventListener('keydown',escVB);
 
   function renderResults(items){
     resultsEl.innerHTML='';
@@ -8277,15 +8275,18 @@ function openVideosBrowser(slot,src){
     items.forEach(item=>{
       const card=document.createElement('div');
       card.style.cssText='border:2px solid #000;cursor:pointer;background:#000;display:flex;flex-direction:column;overflow:hidden;';
-      const thumb=`https://archive.org/services/img/${item.identifier}`;
-      const title=(item.title||item.identifier).substring(0,40);
+      const title=String(item.title||item.identifier).substring(0,40);
+      // static markup only — identifier/title come from archive.org and are
+      // set via src/textContent, never interpolated into HTML
       card.innerHTML=`
         <div style="width:100%;aspect-ratio:16/9;background:#000;overflow:hidden;position:relative;flex-shrink:0;">
-          <img src="${thumb}" style="width:100%;height:100%;object-fit:cover;display:block;" loading="lazy" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='flex'"/>
+          <img style="width:100%;height:100%;object-fit:cover;display:block;" loading="lazy" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='flex'"/>
           <div style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;background:#111;font-size:24px;color:#fff;">▶</div>
         </div>
-        <div class="vb-name" style="padding:5px 6px 6px;font-family:'Departure Mono','VT323',monospace;font-size:12px;color:#fff;line-height:1.25;background:#000;">${title}</div>
+        <div class="vb-name" style="padding:5px 6px 6px;font-family:'Departure Mono','VT323',monospace;font-size:12px;color:#fff;line-height:1.25;background:#000;"></div>
       `;
+      card.querySelector('img').src='https://archive.org/services/img/'+encodeURIComponent(item.identifier);
+      card.querySelector('.vb-name').textContent=title;
       card.onmouseenter=()=>{ card.style.outline='3px solid #000'; card.style.outlineOffset='-3px'; };
       card.onmouseleave=()=>{ card.style.outline=''; };
       card.onclick=()=>{
@@ -8294,11 +8295,12 @@ function openVideosBrowser(slot,src){
         // lock the close button
         const closeBtn=modal.querySelector('#vb-close');
         if(closeBtn){closeBtn.style.pointerEvents='none';closeBtn.style.opacity='0.3';}
-        resolveVideoUrl('https://archive.org/details/'+item.identifier).then(url=>{
-          if(!url){setVBStatus('no video found.');resultsEl.style.pointerEvents='';if(closeBtn){closeBtn.style.pointerEvents='';closeBtn.style.opacity='';}return;}
+        const unlock=()=>{resultsEl.style.pointerEvents='';if(closeBtn){closeBtn.style.pointerEvents='';closeBtn.style.opacity='';}};
+        resolveVideoUrl('https://archive.org/details/'+encodeURIComponent(item.identifier)).then(url=>{
+          if(!url){setVBStatus('no video found.');unlock();return;}
           close();
-          loadArchiveVideo(src,slot,url);
-        }).catch(e=>{setVBStatus('error: '+e.message);resultsEl.style.pointerEvents='';});
+          loadArchiveVideo(src,slot,url,tok);
+        }).catch(e=>{setVBStatus('error: '+e.message);unlock();});
       };
       resultsEl.appendChild(card);
     });
@@ -8700,7 +8702,7 @@ function openVideosBrowser(slot,src){
     _loading=false;
   }
 
-  modal.querySelector('#vb-refresh').onclick=loadRandom;
+  modal.querySelector('#vb-refresh').onclick=()=>loadRandom(); // as a bare handler it got the MouseEvent as retryCount
   loadRandom();
 }
 
@@ -8715,31 +8717,27 @@ async function resolveVideoUrl(url){
     setStatus('locating the goods at archive.org: '+id);
     try{
       const metaUrl='https://archive.org/metadata/'+id;
-      let res=null;
-      // try direct first — archive.org metadata has CORS headers
-      try{const r=await fetch(metaUrl);if(r.ok) res=r;}catch(e){}
-      if(!res){
-        const metaProxies=[
-          'https://api.allorigins.win/raw?url='+encodeURIComponent(metaUrl),
-          'https://corsproxy.io/?'+encodeURIComponent(metaUrl),
-          'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(metaUrl),
-        ];
-        for(const p of metaProxies){
-          try{const r=await fetch(p);if(r.ok){res=r;break;}}catch(e){}
-        }
-      }
-      if(!res) throw new Error('all proxies failed for metadata');
+      const res=await fetch(metaUrl,{signal:_sig(15000)});
+      if(!res.ok) throw new Error('metadata request failed ('+res.status+')');
       const data=await res.json();
       const files=data.files||[];
       setStatus('found the stash. picking the best quality...');
       // accept any common video format
       const isVideo=f=>/\.(mp4|webm|ogv|ogg|mpeg|mpg|avi|mov|m4v|mkv)$/i.test(f.name);
-      // prefer derivatives (re-encoded), then originals
-      const derivatives=files.filter(f=>isVideo(f)&&f.source==='derivative').sort((a,b)=>(+b.size||0)-(+a.size||0));
-      const originals=files.filter(f=>isVideo(f)&&f.source!=='derivative').sort((a,b)=>(+b.size||0)-(+a.size||0));
-      const allVideo=[...derivatives,...originals];
-      // last resort: any file with video-like name
-      const anyVideo=allVideo.length?allVideo:files.filter(f=>isVideo(f));
+      // biggest-file-wins picked multi-GB originals / .avi / .mkv the browser
+      // can't play. prefer h.264 .mp4 derivatives, only formats this browser
+      // plays, and the best one under ~250MB
+      const probe=document.createElement('video');
+      const mimeOf=n=>/\.(mp4|m4v)$/i.test(n)?'video/mp4':/\.webm$/i.test(n)?'video/webm':/\.(ogv|ogg)$/i.test(n)?'video/ogg':/\.mov$/i.test(n)?'video/quicktime':'';
+      const playable=f=>{const m=mimeOf(f.name);return !!m&&probe.canPlayType(m)!=='';};
+      const isH264=f=>/h\.?264|mpeg4/i.test(f.format||'')||/\.(mp4|m4v)$/i.test(f.name);
+      const mp4d=f=>f.source==='derivative'&&/\.mp4$/i.test(f.name);
+      const rank=f=>(mp4d(f)&&/h\.?264/i.test(f.format||''))?0:(mp4d(f)&&isH264(f))?1:isH264(f)?2:3;
+      const CAP=250*1024*1024,sz=f=>+f.size||0,fits=f=>sz(f)>0&&sz(f)<=CAP;
+      const cands=files.filter(f=>f&&f.name&&isVideo(f)&&playable(f)).sort((a,b)=>
+        rank(a)-rank(b)||(fits(b)-fits(a))||(fits(a)?sz(b)-sz(a):sz(a)-sz(b)));
+      // last resort: smallest file with a video-like name
+      const anyVideo=cands.length?cands:files.filter(f=>f&&f.name&&isVideo(f)).sort((a,b)=>sz(a)-sz(b));
       if(anyVideo.length){
         const file=anyVideo[0];
         const direct=`https://archive.org/download/${id}/${encodeURIComponent(file.name)}`;
@@ -8750,7 +8748,7 @@ async function resolveVideoUrl(url){
       const sample=files.slice(0,5).map(f=>f.name).join(', ');
       throw new Error('no video files found. available: '+sample);
     }catch(e){
-      throw new Error('archive.org fetch failed: '+e.message);
+      throw new Error('archive.org fetch failed: '+(e.name==='TimeoutError'?'timed out':e.message));
     }
   }
 
