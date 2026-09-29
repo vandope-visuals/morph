@@ -4553,36 +4553,58 @@ const AUDIO_FX=[
   {id:'bass_inv',label:['bass','inverted']},
   {id:'mid_inv', label:['middle','inverted']}
 ];
+let _audioStream=null,_audioDenied=false,_audioPending=false;
+function _audioRetryBtns(show){state.modules.forEach(m=>{if(m.name!=='audio')return;const b=document.getElementById('audio-retry-'+m.id);if(b)b.style.display=show?'block':'none';});}
+// one attempt at a time; a denial sets _audioDenied and only the retry button asks again
+// (a failed attempt used to null audioCtx, so tickAudio re-prompted with a new AudioContext every frame)
 function initAudio(modId){
-  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-  analyser=audioCtx.createAnalyser();
-  analyser.fftSize=2048;
-  audioData=new Uint8Array(analyser.frequencyBinCount);
+  if(audioCtx||_audioPending) return;
+  _audioDenied=false;
+  const AC=window.AudioContext||window.webkitAudioContext;
+  if(!AC||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){_audioDenied=true;setStatus('audio input unavailable');_audioRetryBtns(true);return;}
+  _audioPending=true;
+  const ctx=new AC();
   navigator.mediaDevices.getUserMedia({audio:true,video:false}).then(stream=>{
-    audioCtx.createMediaStreamSource(stream).connect(analyser);
+    _audioPending=false;
+    // module removed while the prompt was open: don't keep the mic
+    if(!state.modules.some(m=>m.name==='audio')){stream.getTracks().forEach(t=>t.stop());ctx.close().catch(()=>{});return;}
+    audioCtx=ctx;_audioStream=stream;
+    analyser=ctx.createAnalyser();
+    analyser.fftSize=2048;
+    audioData=new Uint8Array(analyser.frequencyBinCount);
+    ctx.createMediaStreamSource(stream).connect(analyser);
     setStatus('audio input active');
-    // hide retry button if visible
-    const btn=document.getElementById('audio-retry-'+modId);
-    if(btn) btn.style.display='none';
+    _audioRetryBtns(false);
   }).catch(()=>{
+    _audioPending=false;_audioDenied=true;
+    ctx.close().catch(()=>{});
     setStatus('audio input denied — click retry to try again');
-    audioCtx=null; analyser=null; audioData=null;
-    // show retry button
-    const btn=document.getElementById('audio-retry-'+modId);
-    if(btn) btn.style.display='block';
+    _audioRetryBtns(true);
   });
 }
+function retryAudio(){if(!_audioPending){_audioDenied=false;initAudio();}}
+// stop the mic tracks and close the context once no audio module is left (the mic used to stay live)
+function releaseAudio(){
+  if(_audioStream) _audioStream.getTracks().forEach(t=>t.stop());
+  if(audioCtx) audioCtx.close().catch(()=>{});
+  audioCtx=null;analyser=null;audioData=null;_audioStream=null;_audioDenied=false;
+}
 function getAudioBand(start,end){
-  if(!analyser||!audioData) return 0;
-  analyser.getByteFrequencyData(audioData);
-  let sum=0;const len=end-start;
+  if(!audioData||end<=start) return 0;
+  let sum=0;
   for(let i=start;i<end;i++) sum+=audioData[i];
-  return sum/(len*255);
+  return sum/((end-start)*255);
 }
 function tickAudio(){
+  _modStep();
+  let any=false,fresh=false;
   state.modules.forEach(mod=>{
-    if(mod.name!=='audio'||mod.enabled===false) return;
-    if(!audioCtx) initAudio(mod.id);
+    if(mod.name!=='audio') return;
+    any=true;
+    if(mod.enabled===false) return;
+    if(!audioCtx&&!_audioDenied) initAudio(mod.id);
+    // refresh the spectrum once per frame here (rms/peak relied on the viz having fetched it)
+    if(analyser&&!fresh){analyser.getByteFrequencyData(audioData);fresh=true;}
     const bins=analyser?analyser.frequencyBinCount:0;
     let val=0;
     const fx=AUDIO_FX[mod.activeFx]?.id||'bass';
@@ -4590,7 +4612,7 @@ function tickAudio(){
     else if(fx==='mid')   val=getAudioBand(Math.floor(bins*0.05),Math.floor(bins*0.3));
     else if(fx==='treble')val=getAudioBand(Math.floor(bins*0.3),Math.floor(bins*0.8));
     else if(fx==='rms'){  if(audioData){let s=0;for(let i=0;i<audioData.length;i++)s+=audioData[i]*audioData[i];val=Math.sqrt(s/audioData.length)/255;}}
-    else if(fx==='peak'){ if(audioData)val=Math.max(...audioData)/255;}
+    else if(fx==='peak'){ if(audioData){let m=0;for(let i=0;i<audioData.length;i++)if(audioData[i]>m)m=audioData[i];val=m/255;}}
     else if(fx==='transient'){
       if(!mod._prevRms) mod._prevRms=0;
       const cur=getAudioBand(0,Math.floor(bins*0.3));
@@ -4603,16 +4625,13 @@ function tickAudio(){
     applyLfoTarget(mod,val);
     drawAudioViz(mod,val);
   });
+  if(!any&&(audioCtx||_audioStream||_audioDenied)) releaseAudio();
 }
 function drawAudioViz(mod,val){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const w=ctx.canvas.width,h=ctx.canvas.height;
   ctx.clearRect(0,0,w,h);
   if(!analyser||!audioData) return;
-  analyser.getByteFrequencyData(audioData);
   ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=1;ctx.beginPath();
   const step=Math.floor(audioData.length/w);
   for(let i=0;i<w;i++){const v=audioData[i*step]||0;const y=h-(v/255)*(h-4);i===0?ctx.moveTo(i,y):ctx.lineTo(i,y);}
@@ -6059,6 +6078,8 @@ function removeModule(id){
     mod.dmosh=null; mod._cfbBuf=null; mod._lastResult=null;
   }
   state.modules=state.modules.filter(m=>m.id!==id);
+  // last audio module gone: stop the mic and close the context now (tickAudio also catches bank switches)
+  if(mod&&mod.name==='audio'&&!state.modules.some(m=>m.name==='audio')) releaseAudio();
   rebuildSlots(); updateCapState();
 }
 
@@ -6263,7 +6284,7 @@ function buildModuleHTML(mod){
           </div>
           ${isModulator?`<div id="${isXYPad?'xy':'lfo'}-routing-${mod.id}"></div>`:''}
           ${isEnv?`<div style="padding:4px 8px 8px;"><button onclick="triggerEnv('${mod.id}')" style="width:100%;background:var(--accent-dim);border:1px solid var(--accent-mid);color:var(--accent);font-family:var(--mono);font-size:9px;padding:5px;border-radius:3px;cursor:pointer;letter-spacing:0.1em;">▶ TRIGGER</button></div>`:''}
-          ${isAudio?`<div style="padding:4px 8px 8px;"><button id="audio-retry-${mod.id}" onclick="audioCtx=null;initAudio('${mod.id}')" style="display:none;width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:var(--mono);font-size:9px;padding:5px;border-radius:3px;cursor:pointer;letter-spacing:0.1em;">↺ retry mic permission</button></div>`:''}
+          ${isAudio?`<div style="padding:4px 8px 8px;"><button id="audio-retry-${mod.id}" onclick="retryAudio()" style="display:${_audioDenied?'block':'none'};width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:var(--mono);font-size:9px;padding:5px;border-radius:3px;cursor:pointer;letter-spacing:0.1em;">↺ retry mic permission</button></div>`:''}
         </div>
       </div>
     </div>`;
