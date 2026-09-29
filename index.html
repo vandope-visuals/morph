@@ -6460,7 +6460,7 @@ function openOutput(){
 
 /* ── RECORDER ── */
 const REC_MAX=60; // seconds
-let recorder=null,recChunks=[],recTimer=null,recSeconds=0;
+let recorder=null,recTimer=null,recSeconds=0;
 let countdownActive=false,countdownInterval=null;
 let captureAspect='16:9'; // '16:9' | '1:1' | '9:16'
 let captureCountdown=0;   // 0 = off, 3 = 3s
@@ -6497,11 +6497,18 @@ function _capCropRect(){
   if(captureAspect==='9:16'){const w=Math.round(sh*9/16/2)*2;return {x:Math.round((sw-w)/2),y:0,w:w,h:sh};}
   return {x:0,y:0,w:sw,h:sh};
 }
-function _drawRecFrame(){
+// one nearest-neighbor blit straight from the output canvas (crop rect mapped
+// from 720p capture space back to W×H), throttled to the 30fps stream rate —
+// was two full-frame blits every rAF, 4× the work on a 120Hz display
+let _recLast=0;
+function _drawRecFrame(force){
   if(!_recCtx) return;
-  _drawCapFrame();
+  const now=performance.now();
+  if(!force&&now-_recLast<29) return;
+  _recLast=now;
+  const kx=W/capCv.width,ky=H/capCv.height,c=_recCrop;
   _recCtx.imageSmoothingEnabled=false;
-  _recCtx.drawImage(capCv,_recCrop.x,_recCrop.y,_recCrop.w,_recCrop.h,0,0,_recCrop.w,_recCrop.h);
+  _recCtx.drawImage(outputCv,c.x*kx,c.y*ky,c.w*kx,c.h*ky,0,0,c.w,c.h);
 }
 
 /* ── CROP CANVAS helper ── */
@@ -6517,13 +6524,19 @@ function getCroppedCanvas(){
 }
 
 /* ── CAPTURE PANEL ── */
+let _capPanelClose=null,_capPanelSetRec=null;
 function openCapturePanel(){
   if(_capturePanelOpen){
-    const existing=document.getElementById('capture-panel');
-    if(existing&&!countdownActive){existing.remove();_capturePanelOpen=false;}
+    if(!countdownActive){
+      if(_capPanelClose) _capPanelClose();
+      else{const ex=document.getElementById('capture-panel');if(ex)ex.remove();_capturePanelOpen=false;}
+    }
     return;
   }
   _capturePanelOpen=true;
+  // every document listener of this panel hangs off one controller, aborted
+  // in closePanel — escH/outsideH used to be removed only when they fired
+  const ac=new AbortController(),sig={signal:ac.signal};
 
   const isDark=document.body.classList.contains('dark');
   const panel=document.createElement('div');
@@ -6599,20 +6612,22 @@ function openCapturePanel(){
   document.body.appendChild(panel);
 
   // close
+  let _outsideT=0,_capPollIv=0;
   function closePanel(){
+    ac.abort();clearTimeout(_outsideT);clearInterval(_capPollIv);
     panel.remove();
     _capturePanelOpen=false;
+    if(_capPanelClose===closePanel){_capPanelClose=null;_capPanelSetRec=null;}
   }
-  document.getElementById('cap-close').onclick=closePanel;
-  const escH=e=>{if(e.key==='Escape'&&!countdownActive){closePanel();document.removeEventListener('keydown',escH);}};
-  document.addEventListener('keydown',escH);
+  _capPanelClose=closePanel;
+  panel.querySelector('#cap-close').onclick=closePanel;
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!countdownActive)closePanel();},sig);
   // click outside
-  setTimeout(()=>{
-    document.addEventListener('mousedown',function outsideH(e){
-      if(!panel.contains(e.target)&&e.target.id!=='capture-open-btn'&&!document.getElementById('capture-open-btn').contains(e.target)){
-        if(!countdownActive){closePanel();document.removeEventListener('mousedown',outsideH);}
-      }
-    });
+  _outsideT=setTimeout(()=>{
+    document.addEventListener('mousedown',e=>{
+      const ob=document.getElementById('capture-open-btn');
+      if(!panel.contains(e.target)&&!(ob&&ob.contains(e.target))&&!countdownActive) closePanel();
+    },sig);
   },100);
 
   // aspect ratio buttons
@@ -6644,14 +6659,14 @@ function openCapturePanel(){
   });
 
   function setCaptureStatus(msg){
-    const el=document.getElementById('cap-status');
+    const el=panel.querySelector('#cap-status');
     if(el) el.textContent=msg;
   }
 
   function setVideoRecState(rec){
-    const vBtn=document.getElementById('cap-video-btn');
-    const vLbl=document.getElementById('cap-video-lbl');
-    const iconSlot=document.getElementById('cap-video-icon');
+    const vBtn=panel.querySelector('#cap-video-btn');
+    const vLbl=panel.querySelector('#cap-video-lbl');
+    const iconSlot=panel.querySelector('#cap-video-icon');
     if(!vBtn||!vLbl||!iconSlot) return;
     if(rec){
       vBtn.style.background='#fff';
@@ -6663,20 +6678,27 @@ function openCapturePanel(){
       vBtn.style.color='#fff';
       iconSlot.outerHTML=videoIconSVG;
       vLbl.textContent='VIDEO';
+      setCaptureStatus('');
     }
   }
+  // the recorder resets the panel itself (60s auto-stop, toggleRecord, onstop)
+  _capPanelSetRec=setVideoRecState;
+  if(recorder&&recorder.state==='recording') setVideoRecState(true);
 
   // photo
-  document.getElementById('cap-photo-btn').onclick=()=>{
+  panel.querySelector('#cap-photo-btn').onclick=()=>{
     if(countdownActive) return;
     runWithCountdown(()=>{
       doFlash(()=>{
-        state._tutCapture=true;
         const cv=getCroppedCanvas();
         const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
         const filename='morph-photo-'+ts+'.png';
+        let href;
+        try{href=cv.toDataURL('image/png');}
+        catch(e){setStatus('photo blocked — a cross-origin source tainted the canvas');setCaptureStatus('');return;}
         const link=document.createElement('a');
-        link.download=filename;link.href=cv.toDataURL('image/png');link.click();
+        link.download=filename;link.href=href;link.click();
+        state._tutCapture=true;
         setStatus('photo saved');
         showSavePopup('📷 photo saved → '+filename);
         setCaptureStatus('');
@@ -6685,14 +6707,11 @@ function openCapturePanel(){
   };
 
   // video
-  document.getElementById('cap-video-btn').onclick=()=>{
+  panel.querySelector('#cap-video-btn').onclick=()=>{
     if(recorder&&recorder.state==='recording'){
-      state._tutCapture=true;
       stopRecord();
-      setVideoRecState(false);
-      setCaptureStatus('');
     } else if(!countdownActive){
-      runWithCountdown(()=>{ state._tutCapture=true; startRecord(); setVideoRecState(true); });
+      runWithCountdown(()=>{ startRecord(); });
     }
   };
 
@@ -6701,32 +6720,32 @@ function openCapturePanel(){
     let remaining=captureCountdown;
     countdownActive=true;
     setCaptureStatus(remaining+'...');
+    // escCD lives only as long as this countdown (and the panel)
+    const cd=new AbortController();
+    ac.signal.addEventListener('abort',()=>cd.abort());
     countdownInterval=setInterval(()=>{
       remaining--;
       if(remaining<=0){
         clearInterval(countdownInterval);countdownInterval=null;
-        countdownActive=false;
+        countdownActive=false;cd.abort();
         setCaptureStatus('');
         onComplete();
       } else {
         setCaptureStatus(remaining+'...');
       }
     },1000);
-    const escCD=e=>{
+    document.addEventListener('keydown',e=>{
       if(e.key==='Escape'&&countdownActive){
         clearInterval(countdownInterval);countdownInterval=null;
-        countdownActive=false;
+        countdownActive=false;cd.abort();
         setCaptureStatus('cancelled');
         setTimeout(()=>setCaptureStatus(''),1200);
-        document.removeEventListener('keydown',escCD);
       }
-    };
-    document.addEventListener('keydown',escCD);
+    },{signal:cd.signal});
   }
 
   // poll to keep rec timer in status box
-  const _capPollIv=setInterval(()=>{
-    if(!document.getElementById('capture-panel')){clearInterval(_capPollIv);return;}
+  _capPollIv=setInterval(()=>{
     const rec=recorder&&recorder.state==='recording';
     if(rec) setCaptureStatus('● '+recSeconds+'s / '+REC_MAX+'s');
   },500);
@@ -6763,7 +6782,7 @@ function doFlash(cb){
   },180);
 }
 
-/* ── PHOTO (legacy compat for tutorial hooks) ── */
+/* ── PHOTO / RECORD shortcuts (open the panel and press its button) ── */
 function takePhoto(){
   if(!_capturePanelOpen) openCapturePanel();
   setTimeout(()=>{const b=document.getElementById('cap-photo-btn');if(b)b.click();},80);
@@ -6779,50 +6798,77 @@ function toggleRecord(){
   }
 }
 
+// first container the browser can record — Safari only does mp4
+const _REC_TYPES=[['video/webm;codecs=vp9','webm'],['video/webm;codecs=vp8','webm'],['video/webm','webm'],['video/mp4;codecs=avc1','mp4'],['video/mp4','mp4']];
+function _recType(){
+  if(typeof MediaRecorder==='undefined') return null;
+  for(const t of _REC_TYPES) if(MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(t[0])) return {mime:t[0],ext:t[1]};
+  return {mime:'',ext:''};
+}
+
 function startRecord(){
   if(!outputCv){setStatus('no output to record');return;}
-  recChunks=[];recSeconds=0;
-  // record from the fixed 720p capture canvas (honors the aspect setting)
-  _syncCapSize();_drawCapFrame();
-  _recCrop=_capCropRect();
-  _recCv=document.createElement('canvas');_recCv.width=_recCrop.w;_recCv.height=_recCrop.h;
-  _recCtx=_recCv.getContext('2d');
-  _drawRecFrame();
-  const stream=_recCv.captureStream(30);
-  const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-    ?'video/webm;codecs=vp9':'video/webm';
-  recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:8000000});
-  recorder.ondataavailable=e=>{if(e.data&&e.data.size>0)recChunks.push(e.data);};
-  recorder.onstop=()=>{
-    const blob=new Blob(recChunks,{type:'video/webm'});
+  if(recorder&&recorder.state!=='inactive') return;
+  const rt=_recType();
+  if(!rt){setStatus('recording not supported in this browser');return;}
+  // per-recording state: a quick stop→start used to let the old onstop read
+  // (and wipe) the new recording's chunks and canvas
+  _syncCapSize();
+  const crop=_capCropRect();
+  const cv=document.createElement('canvas');cv.width=crop.w;cv.height=crop.h;
+  const cx=cv.getContext('2d');
+  let stream,rec;
+  try{stream=cv.captureStream(30);}
+  catch(e){setStatus(e.name==='SecurityError'?'recording blocked — a cross-origin source tainted the canvas':'recording failed: '+e.message);return;}
+  try{rec=new MediaRecorder(stream,rt.mime?{mimeType:rt.mime,videoBitsPerSecond:8000000}:{videoBitsPerSecond:8000000});}
+  catch(e){stream.getTracks().forEach(t=>t.stop());setStatus('recording failed: '+e.message);return;}
+  const chunks=[];
+  _recCv=cv;_recCtx=cx;_recCrop=crop;
+  _drawRecFrame(true);
+  rec.ondataavailable=e=>{if(e.data&&e.data.size>0)chunks.push(e.data);};
+  rec.onstop=()=>{
+    stream.getTracks().forEach(t=>t.stop());
+    if(_recCv===cv){_recCv=null;_recCtx=null;_recCrop=null;}
+    const type=(rec.mimeType||rt.mime||'video/webm').split(';')[0];
+    const ext=rt.ext||(type.includes('mp4')?'mp4':'webm');
+    const blob=new Blob(chunks,{type});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-    const filename='morph-video-'+ts+'.webm';
+    const filename='morph-video-'+ts+'.'+ext;
     a.href=url;a.download=filename;
     document.body.appendChild(a);a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    recChunks=[];
-    _recCv=null;_recCtx=null;_recCrop=null;
-    setRecUI(false);
+    // revoking right after click() cancels the download in Firefox/Safari
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
     setStatus('recording saved');
-    showSavePopup('⏺ video saved → '+filename+' ('+recSeconds+'s)');
+    showSavePopup('⏺ video saved → '+filename+' ('+(rec._secs||0)+'s)');
   };
-  recorder.start(100);
+  try{rec.start(100);}
+  catch(e){stream.getTracks().forEach(t=>t.stop());_recCv=null;_recCtx=null;_recCrop=null;setStatus('recording failed: '+e.message);return;}
+  recorder=rec;recSeconds=0;
+  state._tutCapture=true;
   setRecUI(true);
+  if(_capPanelSetRec) _capPanelSetRec(true);
+  clearInterval(recTimer);
   recTimer=setInterval(()=>{
     recSeconds++;
-    document.getElementById('rec-lbl').textContent=recSeconds+'s';
+    const l=document.getElementById('rec-lbl');if(l)l.textContent=recSeconds+'s';
     if(recSeconds>=REC_MAX) stopRecord();
   },1000);
   setStatus('recording @ 720p — max 60s');
 }
 
+// UI resets here (not in onstop, which fires later and may belong to an
+// older recording) so auto-stop / toggleRecord leave the panel on VIDEO
 function stopRecord(){
   if(!recorder) return;
   clearInterval(recTimer);recTimer=null;
-  recorder.stop();recorder=null;
+  const r=recorder;recorder=null;
+  r._secs=recSeconds;
+  if(r.state!=='inactive') r.stop();
+  setRecUI(false);
+  if(_capPanelSetRec) _capPanelSetRec(false);
 }
 
 function setRecUI(on){
