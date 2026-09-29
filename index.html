@@ -4063,12 +4063,20 @@ function initDmosh(mod){
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   if(!mod.dmosh)mod.dmosh={iFrame:null,iFrameCounter:0,dispBuf:null,flowBuf:null,flowRef:null,moshBuf:null};
 }
+let _dmTrigT=null;
+function _dmTrig(){if(!_dmTrigT){const c=new Float32Array(1025),s=new Float32Array(1025);for(let i=0;i<=1024;i++){const a=i/1024*Math.PI*2;c[i]=Math.cos(a);s[i]=Math.sin(a);}_dmTrigT=[c,s];}return _dmTrigT;}
+// per-module scratch frame for the remap effects (was a fresh W×H×4 array per frame); re-sized on resolution change
+function _dmScratch(dm,len){if(!dm.scratch||dm.scratch.length!==len)dm.scratch=new Uint8ClampedArray(len);return dm.scratch;}
 function copyGray(pixels,buf){for(let i=0,j=0;i<pixels.length;i+=4,j++)buf[j]=(pixels[i]*0.299+pixels[i+1]*0.587+pixels[i+2]*0.114)/255;}
 function primeFx(mod,fxId,d){
   const dm=mod.dmosh,len=d.length;
-  if(fxId==='flow'&&!dm.flowRef){dm.flowRef=new Float32Array(len/4);dm.flowBuf=new Float32Array(len/4*2);dm.moshBuf=new Uint8ClampedArray(len);dm.moshBuf.set(d);copyGray(d,dm.flowRef);}
-  if(fxId==='iframe'&&!dm.iFrame){dm.iFrame=new Uint8ClampedArray(len);dm.iFrame.set(d);}
-  if(fxId==='disp'&&!dm.dispBuf){dm.dispBuf=new Uint8ClampedArray(len);dm.dispBuf.set(d);}
+  // accumulators are Float32: rounded 8-bit lerps with small t never converged (permanent burn-in)
+  if(fxId==='flow'&&(!dm.flowRef||!dm.moshBuf||dm.moshBuf.length!==len)){dm.flowRef=new Float32Array(len/4);dm.flowBuf=new Float32Array(len/4*2);dm.moshBuf=new Uint8ClampedArray(len);dm.moshBuf.set(d);copyGray(d,dm.flowRef);}
+  if(fxId==='iframe'&&(!dm.iFrame||dm.iFrame.length!==len)){dm.iFrame=new Uint8ClampedArray(len);dm.iFrame.set(d);}
+  if(fxId==='disp'&&(!dm.dispBuf||dm.dispBuf.length!==len)){dm.dispBuf=new Float32Array(d);}
+  if(fxId==='aval'&&(!dm.avalBuf||dm.avalBuf.length!==len)){dm.avalBuf=new Float32Array(d);}
+  if(fxId==='pframe'&&(!dm.pframeBuf||dm.pframeBuf.length!==len)){dm.pframeBuf=new Float32Array(d);}
+  if(fxId==='delta'&&(!dm.deltaBuf||dm.deltaBuf.length!==len)){dm.deltaBuf=new Uint8ClampedArray(d);}
 }
 function runFx(fxId,d,intensity,param,dm){
   const len=d.length;
@@ -4083,7 +4091,7 @@ function runFx(fxId,d,intensity,param,dm){
       dm.flowBuf[i*2]=dm.flowBuf[i*2]*decay+gx*strength;
       dm.flowBuf[i*2+1]=dm.flowBuf[i*2+1]*decay+gy*strength;
     }
-    const out=new Uint8ClampedArray(len);
+    const out=_dmScratch(dm,len);
     for(let y=0;y<H;y++)for(let x=0;x<W;x++){
       const i=y*W+x;
       const sx=Math.max(0,Math.min(W-1,Math.round(x+dm.flowBuf[i*2])));
@@ -4101,44 +4109,30 @@ function runFx(fxId,d,intensity,param,dm){
     for(let i=0;i<len;i+=4){const dr=d[i]-dm.iFrame[i],dg=d[i+1]-dm.iFrame[i+1],db=d[i+2]-dm.iFrame[i+2];if(Math.abs(dr)+Math.abs(dg)+Math.abs(db)>20){d[i]=lerp(d[i],dm.iFrame[i]+dr*2,intensity);d[i+1]=lerp(d[i+1],dm.iFrame[i+1]+dg*2,intensity);d[i+2]=lerp(d[i+2],dm.iFrame[i+2]+db*2,intensity);}}
   } else if(fxId==='aval'){
     // Avalanche: pixels fall toward bottom, dragging color down like melting/dripping
-    if(!dm.avalBuf){dm.avalBuf=new Uint8ClampedArray(d);}
+    const A=dm.avalBuf; if(!A)return;
     // blend current frame into buffer slowly
-    const hold=0.85+param*0.13;
-    for(let i=0;i<len;i+=4){
-      dm.avalBuf[i]=lerp(dm.avalBuf[i],d[i],1-hold)|0;
-      dm.avalBuf[i+1]=lerp(dm.avalBuf[i+1],d[i+1],1-hold)|0;
-      dm.avalBuf[i+2]=lerp(dm.avalBuf[i+2],d[i+2],1-hold)|0;
-    }
-    // avalanche: for each pixel, pull color from above row — creates downward drip/smear
+    const k=1-(0.85+param*0.13);
+    for(let i=0;i<len;i+=4){A[i]+=(d[i]-A[i])*k;A[i+1]+=(d[i+1]-A[i+1])*k;A[i+2]+=(d[i+2]-A[i+2])*k;}
+    // one top-down pass with an exponential-decay carry: each row pulls from the (already smeared) row
+    // above. replaces up to 20 two-tap passes; a/(1-a)=steps*strength keeps the same mean drag per frame
     const strength=intensity*param;
-    const steps=Math.max(1,Math.ceil(strength*20));
-    for(let step=0;step<steps;step++){
-      for(let y=H-1;y>0;y--){
-        for(let x=0;x<W;x++){
-          const di=(y*W+x)*4;
-          const si=((y-1)*W+x)*4;
-          // drag pixel from above downward
-          dm.avalBuf[di]=lerp(dm.avalBuf[di],dm.avalBuf[si],strength)|0;
-          dm.avalBuf[di+1]=lerp(dm.avalBuf[di+1],dm.avalBuf[si+1],strength)|0;
-          dm.avalBuf[di+2]=lerp(dm.avalBuf[di+2],dm.avalBuf[si+2],strength)|0;
-        }
-      }
-    }
+    const ns=Math.max(1,Math.ceil(strength*20))*strength,a=ns/(1+ns),b=1-a,rw=W*4;
+    for(let i=rw;i<len;i+=4){A[i]=A[i]*b+A[i-rw]*a;A[i+1]=A[i+1]*b+A[i+1-rw]*a;A[i+2]=A[i+2]*b+A[i+2-rw]*a;}
     // blend avalanche buffer into output
     for(let i=0;i<len;i+=4){
-      d[i]=lerp(d[i],dm.avalBuf[i],intensity)|0;
-      d[i+1]=lerp(d[i+1],dm.avalBuf[i+1],intensity)|0;
-      d[i+2]=lerp(d[i+2],dm.avalBuf[i+2],intensity)|0;
+      d[i]=d[i]+(A[i]-d[i])*intensity;
+      d[i+1]=d[i+1]+(A[i+1]-d[i+1])*intensity;
+      d[i+2]=d[i+2]+(A[i+2]-d[i+2])*intensity;
     }
   } else if(fxId==='warp'){
-    const freq=1+param*8,amp=intensity*20,out=new Uint8ClampedArray(len);
-    for(let y=0;y<H;y++)for(let x=0;x<W;x++){const off=Math.round(Math.sin(y/H*Math.PI*2*freq+performance.now()*0.002)*amp);const sx=Math.max(0,Math.min(W-1,x+off));const si=(y*W+sx)*4,di=(y*W+x)*4;out[di]=d[si];out[di+1]=d[si+1];out[di+2]=d[si+2];out[di+3]=255;}
+    const freq=1+param*8,amp=intensity*20,out=_dmScratch(dm,len),ph=performance.now()*0.002;
+    for(let y=0;y<H;y++){const off=Math.round(Math.sin(y/H*Math.PI*2*freq+ph)*amp);for(let x=0;x<W;x++){const sx=Math.max(0,Math.min(W-1,x+off));const si=(y*W+sx)*4,di=(y*W+x)*4;out[di]=d[si];out[di+1]=d[si+1];out[di+2]=d[si+2];out[di+3]=255;}}
     d.set(out);
   } else if(fxId==='pframe'){
     // P-frame corrupt: divide into blocks, copy each block from a WRONG location in the prev frame
-    if(!dm.pframeBuf){dm.pframeBuf=new Uint8ClampedArray(d);}
+    const P=dm.pframeBuf; if(!P)return;
     const bs=16; // block size
-    const out=new Uint8ClampedArray(d);
+    const out=_dmScratch(dm,len); out.set(d);
     const corruptRate=intensity*0.6;
     for(let by=0;by<H;by+=bs){
       for(let bx=0;bx<W;bx+=bs){
@@ -4152,45 +4146,42 @@ function runFx(fxId,d,intensity,param,dm){
               const sy=Math.max(0,Math.min(H-1,by+y+mvy));
               const di=((by+y)*W+(bx+x))*4;
               const si=(sy*W+sx)*4;
-              out[di]=dm.pframeBuf[si];
-              out[di+1]=dm.pframeBuf[si+1];
-              out[di+2]=dm.pframeBuf[si+2];
+              out[di]=P[si];
+              out[di+1]=P[si+1];
+              out[di+2]=P[si+2];
             }
           }
         }
       }
     }
     // slowly update prev frame buffer
-    const decay=1-param*0.3;
-    for(let i=0;i<len;i+=4){
-      dm.pframeBuf[i]=lerp(dm.pframeBuf[i],d[i],1-decay)|0;
-      dm.pframeBuf[i+1]=lerp(dm.pframeBuf[i+1],d[i+1],1-decay)|0;
-      dm.pframeBuf[i+2]=lerp(dm.pframeBuf[i+2],d[i+2],1-decay)|0;
-    }
+    const k=param*0.3;
+    for(let i=0;i<len;i+=4){P[i]+=(d[i]-P[i])*k;P[i+1]+=(d[i+1]-P[i+1])*k;P[i+2]+=(d[i+2]-P[i+2])*k;}
     d.set(out);
   } else if(fxId==='delta'){
     // Delta frame: show only what CHANGED between frames, amplified — pure inter-frame diff
-    if(!dm.deltaBuf){dm.deltaBuf=new Uint8ClampedArray(d);}
+    const D=dm.deltaBuf; if(!D)return;
     const amp=1+param*8;
     for(let i=0;i<len;i+=4){
-      const dr=(d[i]-dm.deltaBuf[i])*amp;
-      const dg=(d[i+1]-dm.deltaBuf[i+1])*amp;
-      const db=(d[i+2]-dm.deltaBuf[i+2])*amp;
+      const r=d[i],g=d[i+1],b=d[i+2];
+      const dr=(r-D[i])*amp,dg=(g-D[i+1])*amp,db=(b-D[i+2])*amp;
+      // keep the unmodified input as the reference (it used to store its own output, diffing against itself)
+      D[i]=r;D[i+1]=g;D[i+2]=b;
       // blend amplified delta with original
-      d[i]=Math.min(255,Math.max(0,lerp(d[i],128+dr,intensity)))|0;
-      d[i+1]=Math.min(255,Math.max(0,lerp(d[i+1],128+dg,intensity)))|0;
-      d[i+2]=Math.min(255,Math.max(0,lerp(d[i+2],128+db,intensity)))|0;
+      d[i]=Math.min(255,Math.max(0,lerp(r,128+dr,intensity)))|0;
+      d[i+1]=Math.min(255,Math.max(0,lerp(g,128+dg,intensity)))|0;
+      d[i+2]=Math.min(255,Math.max(0,lerp(b,128+db,intensity)))|0;
     }
-    // update buffer BEFORE modification so next frame gets clean diff
-    dm.deltaBuf.set(new Uint8ClampedArray(d.buffer.slice ? d.buffer.slice(0,len) : Array.from(d)));
   } else if(fxId==='bit'){
     const levels=Math.max(2,Math.round(2+(1-param)*62)),q=255/(levels-1);
     for(let i=0;i<len;i+=4){d[i]=lerp(d[i],Math.round(d[i]/q)*q,intensity);d[i+1]=lerp(d[i+1],Math.round(d[i+1]/q)*q,intensity);d[i+2]=lerp(d[i+2],Math.round(d[i+2]/q)*q,intensity);}
   } else if(fxId==='disp'){
-    if(!dm.dispBuf)return;
-    const scale=param*30*intensity,out=new Uint8ClampedArray(len);
-    for(let i=0;i<dm.dispBuf.length;i+=4){dm.dispBuf[i]=Math.round(dm.dispBuf[i]*0.95+d[i]*0.05);dm.dispBuf[i+1]=Math.round(dm.dispBuf[i+1]*0.95+d[i+1]*0.05);dm.dispBuf[i+2]=Math.round(dm.dispBuf[i+2]*0.95+d[i+2]*0.05);}
-    for(let y=0;y<H;y++)for(let x=0;x<W;x++){const di=(y*W+x)*4;const lum=(dm.dispBuf[di]*0.299+dm.dispBuf[di+1]*0.587+dm.dispBuf[di+2]*0.114)/255;const angle=lum*Math.PI*2;const sx=Math.max(0,Math.min(W-1,Math.round(x+Math.cos(angle)*scale)));const sy=Math.max(0,Math.min(H-1,Math.round(y+Math.sin(angle)*scale)));const si=(sy*W+sx)*4;out[di]=d[si];out[di+1]=d[si+1];out[di+2]=d[si+2];out[di+3]=255;}
+    const B=dm.dispBuf; if(!B)return;
+    const scale=param*30*intensity,out=_dmScratch(dm,len);
+    for(let i=0;i<len;i+=4){B[i]=B[i]*0.95+d[i]*0.05;B[i+1]=B[i+1]*0.95+d[i+1]*0.05;B[i+2]=B[i+2]*0.95+d[i+2]*0.05;}
+    // angle = lum*2π: cos/sin from a 1024-step table instead of two trig calls per pixel
+    const CS=_dmTrig(),dx=CS[0],dy=CS[1];
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){const di=(y*W+x)*4;const li=((B[di]*0.299+B[di+1]*0.587+B[di+2]*0.114)*4.0157)|0;const sx=Math.max(0,Math.min(W-1,Math.round(x+dx[li]*scale)));const sy=Math.max(0,Math.min(H-1,Math.round(y+dy[li]*scale)));const si=(sy*W+sx)*4;out[di]=d[si];out[di+1]=d[si+1];out[di+2]=d[si+2];out[di+3]=255;}
     d.set(out);
   }
 }
@@ -4230,20 +4221,28 @@ function processDatmoshModule(mod,srcCanvas){
   mod._lastResult=mod.offscreen;
   return mod.offscreen;
 }
+// drop an effect's accumulation state so it starts fresh next time it's enabled
+function _dmoshResetFx(mod,fxId){
+  const dm=mod.dmosh; if(!dm) return;
+  if(fxId==='flow'){dm.moshBuf=null;dm.flowRef=null;dm.flowBuf=null;}
+  else if(fxId==='iframe'){dm.iFrame=null;dm.iFrameCounter=0;}
+  else if(fxId==='disp') dm.dispBuf=null;
+  else if(fxId==='pframe') dm.pframeBuf=null;
+  else if(fxId==='delta') dm.deltaBuf=null;
+  else if(fxId==='aval') dm.avalBuf=null;
+}
 function toggleDmoshFx(modId,fxId){
   const mod=state.modules.find(m=>m.id===modId);if(!mod)return;
   if(!mod.activeFxQueue)mod.activeFxQueue=[];
   const idx=mod.activeFxQueue.indexOf(fxId);
   if(idx>=0){
     mod.activeFxQueue.splice(idx,1);
-    // reset buffers for this effect so it starts fresh next time
-    if(fxId==='flow'&&mod.dmosh){mod.dmosh.moshBuf=null;mod.dmosh.flowRef=null;mod.dmosh.flowBuf=null;}
-    if(fxId==='iframe'&&mod.dmosh){mod.dmosh.iFrame=null;mod.dmosh.iFrameCounter=0;}
-    if(fxId==='disp'&&mod.dmosh){mod.dmosh.dispBuf=null;}
-    if(fxId==='pframe'&&mod.dmosh){mod.dmosh.pframeBuf=null;mod.dmosh.pframeRef=null;}
-    if(fxId==='delta'&&mod.dmosh){mod.dmosh.deltaBuf=null;}
-    if(fxId==='aval'&&mod.dmosh){mod.dmosh.avalBuf=null;}
-  } else{if(mod.activeFxQueue.length>=1)mod.activeFxQueue.shift();mod.activeFxQueue.push(fxId);}
+    _dmoshResetFx(mod,fxId);
+  } else{
+    // the evicted effect is reset like an explicit toggle-off (it used to keep stale buffers)
+    if(mod.activeFxQueue.length>=1)_dmoshResetFx(mod,mod.activeFxQueue.shift());
+    mod.activeFxQueue.push(fxId);
+  }
   _fxKeysOf('fxkeys-'+modId).forEach(k=>k.classList.toggle('active',mod.activeFxQueue.includes(k.dataset.fxid)));
   const active=mod.activeFxQueue[mod.activeFxQueue.length-1];
   const lbl=document.getElementById('param-lbl-'+modId);
