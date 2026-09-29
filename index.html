@@ -8636,6 +8636,8 @@ function snapshotBank(){
   return{
     xfade:state.xfade,
     modules:state.modules.map(m=>({
+      // id is kept so relinkTargets can map LFO/XY targets onto the new modules
+      id:m.id,
       name:m.name,type:m.type,color:m.color,
       activeFx:m.activeFx,
       activeFxQueue:m.activeFxQueue?[...m.activeFxQueue]:[],
@@ -8653,7 +8655,9 @@ function snapshotBank(){
   };
 }
 
+let _bankSwitching=false;
 function autoSave(){
+  if(_bankSwitching) return;
   banks[activeBank]=snapshotBank();
 }
 
@@ -8673,6 +8677,7 @@ function selectBank(key){
   setStatus('bank '+key+' selected — press enter to switch');
 }
 
+let _bankIdN=0;
 function confirmBank(){
   if(!pendingBank) return;
   // save current state into active bank
@@ -8689,18 +8694,23 @@ function confirmBank(){
   });
   const be2=document.getElementById('bank-enter');
   if(be2) be2.classList.remove('ready');
-  // restore bank state if it exists
   const snap=banks[activeBank];
-  if(snap){
-    setXfade(snap.xfade);
-    document.getElementById('mxf').value=snap.xfade;
-    state.modules=snap.modules.map(m=>{
-      const mod={
-        id:'m'+Date.now()+Math.random(),
+  // release the outgoing modules the same way the × button does (canvases,
+  // buffers, audio); rebuild/autosave are held until the new chain is in
+  _bankSwitching=true;
+  try{
+    state.modules.slice().forEach(m=>removeModule(m.id));
+    state.modules=[];
+    if(snap){
+      setXfade(snap.xfade);
+      document.getElementById('mxf').value=snap.xfade;
+      state.modules=snap.modules.map(m=>({
+        // no '.' in ids (they end up in CSS selectors)
+        id:'m'+Date.now().toString(36)+'b'+(++_bankIdN),
         name:m.name,type:m.type,color:m.color,
         cv:null,offscreen:null,offCtx:null,
         activeFx:m.activeFx,
-        activeFxQueue:[...m.activeFxQueue],
+        activeFxQueue:[...(m.activeFxQueue||[])],
         intensity:m.intensity,param:m.param,
         open:m.open,enabled:m.enabled,
         lfoTarget:m.lfoTarget?{...m.lfoTarget}:null,
@@ -8711,44 +8721,34 @@ function confirmBank(){
         seqPresets:m.seqPresets?m.seqPresets.map(p=>[...p]):null,
         channelGain:m.channelGain?{...m.channelGain}:null,
         geomAngle:m.geomAngle||0
-      };
-      return mod;
-    });
-    rebuildSlots();
-    // re-link lfoTargets by name since IDs changed
-    relinkTargets(snap.modules,state.modules);
-    setStatus('switched to bank '+activeBank);
-  } else {
-    // empty bank — clear chain
-    state.modules=[];
-    rebuildSlots();
-    setStatus('bank '+activeBank+' — empty');
-  }
+      }));
+      // re-link modulator targets since IDs changed
+      relinkTargets(snap.modules,state.modules);
+    }
+  }finally{_bankSwitching=false;}
+  rebuildSlots();
+  if(typeof updateCapState==='function') updateCapState();
+  setStatus(snap?'switched to bank '+activeBank:'bank '+activeBank+' — empty');
 }
 
 function relinkTargets(snapMods,newMods){
-  // snap and new modules are in same order, relink by index
-  snapMods.forEach((sm,i)=>{
-    const nm=newMods[i]; if(!nm) return;
-    if(sm.lfoTarget&&sm.lfoTarget.targetId!=='xfade'){
-      const ti=snapMods.findIndex(m=>m.id===sm.lfoTarget.targetId);
-      if(ti>=0&&newMods[ti]) nm.lfoTarget={targetId:newMods[ti].id,targetKnob:sm.lfoTarget.targetKnob};
-    }
-    if(sm.xyTargetX&&sm.xyTargetX.targetId!=='xfade'){
-      const ti=snapMods.findIndex(m=>m.id===sm.xyTargetX.targetId);
-      if(ti>=0&&newMods[ti]) nm.xyTargetX={targetId:newMods[ti].id,targetKnob:sm.xyTargetX.targetKnob};
-    }
-    if(sm.xyTargetY&&sm.xyTargetY.targetId!=='xfade'){
-      const ti=snapMods.findIndex(m=>m.id===sm.xyTargetY.targetId);
-      if(ti>=0&&newMods[ti]) nm.xyTargetY={targetId:newMods[ti].id,targetKnob:sm.xyTargetY.targetKnob};
-    }
+  // snap and new modules are in the same order: map old id → new id by index
+  const idMap={};
+  snapMods.forEach((sm,i)=>{if(sm.id&&newMods[i])idMap[sm.id]=newMods[i].id;});
+  const remap=t=>{
+    if(!t||!t.targetId||t.targetId==='xfade') return t;
+    return idMap[t.targetId]?{targetId:idMap[t.targetId],targetKnob:t.targetKnob}:null;
+  };
+  newMods.forEach(nm=>{
+    nm.lfoTarget=remap(nm.lfoTarget);
+    nm.xyTargetX=remap(nm.xyTargetX);
+    nm.xyTargetY=remap(nm.xyTargetY);
   });
-  rebuildSlots();
 }
 
 // auto-save current bank on every module add/remove/change
 const _origRebuild=rebuildSlots;
-rebuildSlots=function(){_origRebuild();autoSave();};
+rebuildSlots=function(){if(_bankSwitching)return;_origRebuild();autoSave();};
 </script>
 
 <!-- ARCHIVE PROMPT -->
