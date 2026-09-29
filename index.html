@@ -6397,30 +6397,48 @@ function flashMidi(){
   if(!state.midiOn)setTimeout(()=>d.classList.remove('on'),100);
 }
 
+// writes the audience page into the (same-origin, about:blank) popup. the
+// keydown script used to be split as `<scr\`+\`ipt>` inside the template
+// literal, which wrote that text literally — F-fullscreen never worked.
+function _writeOutputDoc(w){
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html><head><title>m-or.ph output</title><style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    html,body{background:#000;width:100%;height:100%;overflow:hidden;}
+    canvas{display:block;width:100%;height:100%;object-fit:contain;}
+  </style></head><body><canvas id="c"></canvas><script>
+    document.addEventListener('keydown',e=>{
+      if(e.key==='f'||e.key==='F') document.documentElement.requestFullscreen().catch(()=>{});
+    });
+  <\/script></body></html>`);
+  w.document.close();
+}
+function _outputClosed(){
+  clearInterval(state._outWatch);state._outWatch=null;
+  state.outputWin=null;
+  state.outputStreaming=false;
+  state._outputWinReady=false;
+  state.modules.forEach(m=>{m._skipFrame=0;m._lastResult=null;});
+  const b=document.getElementById('btn-out');
+  if(b){b.textContent='output window';b.classList.remove('on');}
+}
 function openOutput(){
   const btn=document.getElementById('btn-out');
   if(state.outputWin&&!state.outputWin.closed){state.outputWin.focus();return;}
   if(window._stopWorkerRender) window._stopWorkerRender();
 
-  state.outputWin=window.open('','vs-out','width=1280,height=720,menubar=no,toolbar=no,location=no');
+  // popup blockers return null — bail before touching streaming state
+  const w=window.open('','vs-out','width=1280,height=720,menubar=no,toolbar=no,location=no');
+  if(!w){setStatus('output window blocked — allow pop-ups for this site and try again');return;}
+  try{_writeOutputDoc(w);}catch(e){try{w.close();}catch(_){} setStatus('could not open output window');return;}
+  state.outputWin=w;
   state.outputStreaming=true;
   state._outputWinReady=false;
   if(state.bc){try{state.bc.close();}catch(e){} state.bc=null;}
 
-  state.outputWin.document.write(`<!DOCTYPE html><html><head><style>
-    *{margin:0;padding:0;box-sizing:border-box;}
-    html,body{background:#000;width:100%;height:100%;overflow:hidden;}
-    canvas{display:block;width:100%;height:100%;object-fit:contain;}
-  </style></head><body><canvas id="c"></canvas><scr\`+\`ipt>
-    document.addEventListener('keydown',e=>{
-      if(e.key==='f'||e.key==='F') document.documentElement.requestFullscreen().catch(()=>{});
-    });
-  <\/script></body></html>`);
-  state.outputWin.document.close();
-
   // give the child window time to fully parse and render its DOM
   setTimeout(()=>{
-    if(state.outputWin&&!state.outputWin.closed){
+    if(state.outputWin===w&&!w.closed){
       state._outputWinReady=true;
     }
   },300);
@@ -6428,16 +6446,15 @@ function openOutput(){
   btn.textContent='output open';btn.classList.add('on');
   setStatus('output window open — press F to fullscreen');
 
-  const closeWatcher=setInterval(()=>{
-    if(!state.outputWin||state.outputWin.closed){
-      clearInterval(closeWatcher);
-      state.outputWin=null;
-      state.outputStreaming=false;
-      state._outputWinReady=false;
-      state.modules.forEach(m=>{m._skipFrame=0;m._lastResult=null;});
-      const b=document.getElementById('btn-out');
-      if(b){b.textContent='output window';b.classList.remove('on');}
-    }
+  // one watcher: resets streaming when the window closes, and re-writes the
+  // page if the user reloaded the popup (canvas #c gone → frames went nowhere)
+  clearInterval(state._outWatch);
+  state._outWatch=setInterval(()=>{
+    const ow=state.outputWin;
+    if(!ow||ow.closed){_outputClosed();return;}
+    try{
+      if(ow.document.readyState==='complete'&&!ow.document.getElementById('c')) _writeOutputDoc(ow);
+    }catch(e){_outputClosed();}
   },1000);
 }
 
