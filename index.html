@@ -1824,7 +1824,8 @@ function _applyResolution(w,h){
 }
 /* ── SOURCE SYSTEM ── */
 // Each source: {type, label, active, vidEl, vid2El, stream, color, offscreen, offCtx}
-const _defaultSlotFx=()=>({size:0.59,rotate:0.5,fade:1.0,mirrorH:false,mirrorV:false,rotAngle:0});
+// size: fader 0–1 maps to 0–200% scale, 0.5 = 100% (neutral)
+const _defaultSlotFx=()=>({size:0.5,rotate:0.5,fade:1.0,mirrorH:false,mirrorV:false,rotAngle:0});
 const sources={
   A:{type:null,label:'empty',active:false,vidEl:null,vid2El:null,stream:null,color:'#000000',offscreen:null,offCtx:null,slotFx:_defaultSlotFx()},
   B:{type:null,label:'empty',active:false,vidEl:null,vid2El:null,stream:null,color:'#000000',offscreen:null,offCtx:null,slotFx:_defaultSlotFx()}
@@ -1836,7 +1837,6 @@ let pickMode=null; // 'A' or 'B' when pick mode active
 /* ── IMAGE SOURCE: draw fit, slotFx handles transforms ── */
 function renderImageFx(src){
   if(!src.offscreen||!src._imgEl) return src.offscreen;
-  if(src.imgFx&&src.imgFx.r1!==undefined){if(!src.slotFx)src.slotFx=_defaultSlotFx();src.slotFx.size=src.imgFx.size||0.59;src.imgFx=null;}
   const ctx=src.offCtx,img=src._imgEl;
   const iw=img.naturalWidth||img.width||W,ih=img.naturalHeight||img.height||H;
   ctx.clearRect(0,0,W,H);const scale=Math.min(W/iw,H/ih);const dw=iw*scale,dh=ih*scale;
@@ -1848,8 +1848,10 @@ function applySlotFx(src){
   if(!src.offscreen||!src.slotFx) return;
   const fx=src.slotFx;
   const rotRate=((fx.rotate||0.5)-0.5)*2;
-  const sz=(fx.size!==undefined?fx.size:0.59)*2;
-  const needsTransform=Math.abs(rotRate)>0.04||Math.abs(sz-1.18)>0.02||fx.mirrorH||fx.mirrorV||(fx.fade!==undefined&&fx.fade<0.99);
+  // scale = fader×2 so the label (fader×200%) is the real zoom. the neutral
+  // point was 1.18 (untransformed at "118%", 1.22× one notch off it)
+  const sz=(fx.size!==undefined?fx.size:0.5)*2;
+  const needsTransform=Math.abs(rotRate)>0.04||Math.abs(sz-1)>0.005||fx.mirrorH||fx.mirrorV||(fx.fade!==undefined&&fx.fade<0.99);
   if(!needsTransform) return;
   if(Math.abs(rotRate)>0.04) fx.rotAngle=(fx.rotAngle||0)+rotRate*0.05*Math.PI;
   // temp canvas cached per source — was allocated fresh on every transformed
@@ -1901,23 +1903,37 @@ function renderTextSource(src){
   ctx.clearRect(0,0,W,H); // transparent bg — composites cleanly over other source
   const txt=(p.text||'').trim();
   if(!txt) return src.offscreen;
-  const font=TEXT_FONTS[p.fontIndex||0];
-  const lines=txt.split('\n');
-  let sz=Math.round(H*0.28);
-  ctx.textAlign='center';ctx.textBaseline='middle';
-  for(let i=0;i<30;i++){
-    ctx.font=sz+'px '+font.family;
-    const maxW=Math.max(...lines.map(l=>ctx.measureText(l||' ').width));
-    if(maxW<=W*0.9&&sz*lines.length*1.35<=H*0.9) break;
-    sz=Math.round(sz*0.85);if(sz<6) break;
+  // the fit loop (up to 30 measureText passes + allocations) ran every frame;
+  // lay out once per text/font/color/size (and per webfont load) and blit
+  const key=txt+'\u0000'+(p.fontIndex||0)+'|'+(p.color||'#ffffff')+'|'+W+'x'+H+'|'+_fontEpoch;
+  let base=src._txtCv;
+  if(!base||src._txtKey!==key){
+    if(!base){base=src._txtCv=document.createElement('canvas');}
+    base.width=W;base.height=H;
+    const bc=base.getContext('2d');
+    const font=TEXT_FONTS[p.fontIndex||0];
+    const lines=txt.split('\n');
+    let sz=Math.round(H*0.28);
+    bc.textAlign='center';bc.textBaseline='middle';
+    for(let i=0;i<30;i++){
+      bc.font=sz+'px '+font.family;
+      let maxW=0;for(const l of lines){const w=bc.measureText(l||' ').width;if(w>maxW)maxW=w;}
+      if(maxW<=W*0.9&&sz*lines.length*1.35<=H*0.9) break;
+      sz=Math.round(sz*0.85);if(sz<6) break;
+    }
+    bc.font=sz+'px '+font.family;
+    bc.fillStyle=p.color||'#ffffff';
+    const lineH=sz*1.35;
+    const startY=(H-lineH*lines.length)/2+lineH*0.5;
+    lines.forEach((line,i)=>bc.fillText(line,W/2,startY+i*lineH));
+    src._txtKey=key;
   }
-  ctx.font=sz+'px '+font.family;
-  ctx.fillStyle=p.color||'#ffffff';
-  const lineH=sz*1.35;
-  const startY=(H-lineH*lines.length)/2+lineH*0.5;
-  lines.forEach((line,i)=>ctx.fillText(line,W/2,startY+i*lineH));
+  ctx.drawImage(base,0,0);
   return src.offscreen;
 }
+// bumped whenever a webfont finishes loading so cached text re-lays out
+let _fontEpoch=0;
+try{document.fonts.addEventListener('loadingdone',()=>{_fontEpoch++;});}catch(e){}
 
 function getSourceCanvas(slot){
   const src=sources[slot];if(!src.active) return null;
@@ -1936,23 +1952,44 @@ function getSourceCanvas(slot){
     const vid=src.vidEl;if(!vid) return null;
     if(vid.readyState<2&&!vid.videoWidth) return null;
     if(src.type==='screen'&&vid.videoWidth>W){
-      if(!src._bitmapPending){src._bitmapPending=true;createImageBitmap(vid,{resizeWidth:W,resizeHeight:H,resizeQuality:'pixelated'}).then(bmp=>{ctx.drawImage(bmp,0,0,W,H);bmp.close();src._bitmapPending=false;}).catch(()=>{src._bitmapPending=false;});}
+      // downscale off-thread; the last finished bitmap is drawn every frame so
+      // applySlotFx always transforms a fresh frame (drawing only on resolve
+      // left pending frames re-transforming their own output: flip flicker,
+      // compounding fade/size)
+      if(src._bmpVid!==vid){if(src._bmp){src._bmp.close();src._bmp=null;}src._bmpVid=vid;}
+      if(!src._bitmapPending){
+        src._bitmapPending=true;
+        createImageBitmap(vid,{resizeWidth:W,resizeHeight:H,resizeQuality:'pixelated'}).then(bmp=>{
+          src._bitmapPending=false;
+          if(src.vidEl!==vid||src._bmpVid!==vid){bmp.close();return;}
+          if(src._bmp) src._bmp.close();
+          src._bmp=bmp;
+        }).catch(()=>{src._bitmapPending=false;});
+      }
+      ctx.clearRect(0,0,W,H);
+      if(!src._bmp) return src.offscreen;
+      ctx.drawImage(src._bmp,0,0,W,H);
       applySlotFx(src);return src.offscreen;
     }
-    try{
-      if((src.type==='file')&&src.vid2El&&vid.duration){
-        const remaining=vid.duration-vid.currentTime;
-        if(remaining<FADE_DUR&&src.vid2El.src&&src.vid2El.readyState>=2){ctx.globalAlpha=1;ctx.drawImage(src.vid2El,0,0,W,H);ctx.globalAlpha=remaining/FADE_DUR;ctx.drawImage(vid,0,0,W,H);ctx.globalAlpha=1;}
-        else{ctx.drawImage(vid,0,0,W,H);}
-        if(remaining<FADE_DUR+0.1&&remaining>FADE_DUR-0.1&&src.vid2El.src===vid.src&&src.vid2El.paused){src.vid2El.currentTime=0;src.vid2El.play().catch(()=>{});}
-      } else{ctx.drawImage(vid,0,0,W,H);}
-    }catch(e){
-      if(e.name==='SecurityError'){
-        console.warn('morph: canvas SecurityError on slot',slot,'— video may lack CORS headers',vid.src?.substring(0,80));
-        src.offscreen=null;src.offCtx=null;
-        return null;
+    // (no try/catch: drawing a cross-origin video taints silently rather than
+    // throwing — the SecurityError surfaces at getImageData in the modules,
+    // which renderFrame already handles)
+    const v2=src.vid2El;
+    if(src.type==='file'&&v2&&vid.duration&&isFinite(vid.duration)){
+      const fd=Math.min(FADE_DUR,vid.duration/4);
+      const remaining=vid.duration-vid.currentTime;
+      if(!src._xfading&&remaining<fd&&vid.currentTime>fd&&v2.paused&&!vid.paused){
+        src._xfading=true;
+        try{v2.currentTime=0;}catch(e){}
+        v2.playbackRate=vid.playbackRate;
+        v2.play().catch(()=>{});
       }
-    }
+      if(src._xfading&&v2.readyState>=2&&!v2.paused){
+        ctx.globalAlpha=1;ctx.drawImage(v2,0,0,W,H);
+        ctx.globalAlpha=Math.max(0,Math.min(1,remaining/fd));ctx.drawImage(vid,0,0,W,H);ctx.globalAlpha=1;
+        if(remaining<=0.04||vid.ended) _vidEndXfade(src);
+      } else ctx.drawImage(vid,0,0,W,H);
+    } else ctx.drawImage(vid,0,0,W,H);
     applySlotFx(src);return src.offscreen;
   }
   return null;
@@ -2172,11 +2209,13 @@ function pickSource(type){
 
 function swapSources(){
   // swap all logical properties but keep offscreen canvases in place (they're slot-specific)
-  const propsToSwap=['type','label','active','vidEl','vid2El','stream','color','genParam','genFrame','genState','_imgEl','imgFx','slotFx','webcamDeviceId','webcamDevices','textParams'];
+  const propsToSwap=['type','label','active','vidEl','vid2El','stream','color','genParam','genFrame','genState','_imgEl','imgFx','slotFx','webcamDeviceId','webcamDevices','textParams','_blobUrl','_xfading','_bmp','_bmpVid'];
   const tmpA={};
   propsToSwap.forEach(k=>{ tmpA[k]=sources.A[k]; });
   propsToSwap.forEach(k=>{ sources.A[k]=sources.B[k]; });
   propsToSwap.forEach(k=>{ sources.B[k]=tmpA[k]; });
+  // pending loads were aimed at the old slot contents — drop them
+  ++_loadTok.A;++_loadTok.B;
   // clear and re-render both offscreen canvases on next frame
   ['A','B'].forEach(slot=>{
     const src=sources[slot];
@@ -2196,21 +2235,58 @@ function swapSources(){
   setStatus('sources swapped');
 }
 
-function loadSourceType(slot,type){
-  const src=sources[slot];
-  // clear any error status lock from a previous failed load
-  setStatus._cap=false;
-  // clean up previous source
+// per-slot load token: every new pick bumps it, and async loads (file/image
+// decode, archive resolve, camera/screen permission) drop their result if it
+// changed meanwhile — a late resolution used to overwrite (and leak) a newer
+// source in the same slot
+const _loadTok={A:0,B:0};
+// new source is ready: only now release the old one. cleanup used to run
+// before the file dialog / permission prompt, so cancel or deny left the
+// slot black
+function _commitSource(slot){
   cleanupSource(slot);
-  src.type=type;
   // reset all module offscreens — clears any canvas taint from previous source
   state.modules.forEach(mod=>{
     mod.offscreen=null;mod.offCtx=null;
     if(mod.dmosh) mod.dmosh={iFrame:null,iFrameCounter:0,dispBuf:null,flowBuf:null,flowRef:null,moshBuf:null};
   });
+}
+function _stopStream(stream){if(stream)stream.getTracks().forEach(t=>t.stop());}
+function _srcReady(slot,msg){
+  updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+  if(msg) setStatus(msg);
+}
+function _startWebcam(slot,deviceId,cams){
+  const src=sources[slot];
+  const tok=++_loadTok[slot];
+  const constraints={video:deviceId?{deviceId:{exact:deviceId}}:true,audio:false};
+  navigator.mediaDevices.getUserMedia(constraints).then(stream=>{
+    if(_loadTok[slot]!==tok){_stopStream(stream);return;}
+    _commitSource(slot);
+    const vid=makeVideoEl();
+    vid.srcObject=stream;vid.play().catch(()=>{});
+    src.type='webcam';src.vidEl=vid;src.stream=stream;
+    src.active=true;src.label='webcam';
+    src.webcamDeviceId=deviceId||null;
+    src.webcamDevices=cams||null;
+    if(!src.slotFx) src.slotFx=_defaultSlotFx();
+    _srcReady(slot,'webcam active on '+slot);
+  }).catch(e=>{if(_loadTok[slot]===tok){setStatus('webcam denied');updateSourcePickState();}});
+}
+
+function loadSourceType(slot,type){
+  const src=sources[slot];
+  const tok=++_loadTok[slot];
+  // clear any error status lock from a previous failed load
+  setStatus._cap=false;
+  // a pending camera picker belongs to the pick this one replaces
+  if(src.webcamPicker){src.webcamPicker=false;src.webcamStartCam=null;updateSrcNodeControls(slot);}
 
   if(type==='file'||type==='video'){
-    document.getElementById('file'+slot).click();
+    const el=document.getElementById('file'+slot);
+    // reset so re-picking the same file fires change again
+    el.value='';
+    el.click();
   } else if(type==='image'){
     const el=document.getElementById('image'+slot);
     el.value='';
@@ -2235,72 +2311,65 @@ function loadSourceType(slot,type){
       setStatus._noReset=true;
       setStatus('resolving archive.org URL…');
       resolveVideoUrl(raw).then(url=>{
+        if(_loadTok[slot]!==tok){setStatus._noReset=false;return;}
         if(!url){setStatus._noReset=false;setStatus('could not find video at archive.org');return;}
-        loadArchiveVideo(src,slot,url);
-      }).catch(e=>{setStatus._noReset=false;setStatus('archive.org error: '+e.message);});
+        loadArchiveVideo(src,slot,url,tok);
+      }).catch(e=>{setStatus._noReset=false;if(_loadTok[slot]===tok)setStatus('archive.org error: '+e.message);});
     };
     okBtn.onclick=submit;
     cancelBtn.onclick=()=>{ cleanup(); updateSourcePickState(); };
     input.onkeydown=e=>{ if(e.key==='Enter') submit(); if(e.key==='Escape'){ cleanup(); updateSourcePickState(); } };
   } else if(type==='videos'){
-    openVideosBrowser(slot,src);
+    openVideosBrowser(slot,src,tok);
   } else if(type==='webcam'){
-    if(!src.slotFx) src.slotFx=_defaultSlotFx();
     navigator.mediaDevices.enumerateDevices().then(devices=>{
+      if(_loadTok[slot]!==tok) return;
       const cams=devices.filter(d=>d.kind==='videoinput');
-      function startCam(deviceId){
-        const constraints={video:deviceId?{deviceId:{exact:deviceId}}:true,audio:false};
-        navigator.mediaDevices.getUserMedia(constraints).then(stream=>{
-          const vid=makeVideoEl();
-          vid.srcObject=stream;vid.play().catch(()=>{});
-          src.vidEl=vid;src.stream=stream;
-          src.active=true;src.label='webcam';
-          src.webcamDeviceId=deviceId||null;
-          src.webcamDevices=cams;
-          updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
-          setStatus('webcam active on '+slot);
-        }).catch(e=>{setStatus('webcam denied');});
-      }
       if(cams.length<=1){
-        startCam(cams[0]?.deviceId||null);
+        _startWebcam(slot,cams[0]?.deviceId||null,cams);
       } else {
-        src.active=false;src.label='pick cam';src.webcamDevices=cams;src.webcamPicker=true;src.webcamPickSlot=slot;src.webcamStartCam=startCam;
+        // picker shows in the slot's controls; the current source keeps
+        // running until a camera is actually loaded
+        src.webcamDevices=cams;src.webcamPicker=true;src.webcamPickSlot=slot;
+        src.webcamStartCam=deviceId=>_startWebcam(slot,deviceId,cams);
         updateSrcNodeControls(slot);updateSourcesAccordion();
         setStatus('pick camera for '+slot);
       }
-    }).catch(()=>{
-      navigator.mediaDevices.getUserMedia({video:true,audio:false}).then(stream=>{
-        const vid=makeVideoEl();
-        vid.srcObject=stream;vid.play().catch(()=>{});
-        src.vidEl=vid;src.stream=stream;
-        src.active=true;src.label='webcam';
-        updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
-        setStatus('webcam active on '+slot);
-      }).catch(e=>{setStatus('webcam denied');});
-    });
+    }).catch(()=>{ if(_loadTok[slot]===tok) _startWebcam(slot,null,null); });
   } else if(type==='screen'){
     navigator.mediaDevices.getDisplayMedia({video:{width:{max:1280},height:{max:720},frameRate:{ideal:30,max:30}},audio:false}).then(stream=>{
+      if(_loadTok[slot]!==tok){_stopStream(stream);return;}
+      _commitSource(slot);
       const vid=makeVideoEl();
       vid.srcObject=stream;vid.play().catch(()=>{});
-      src.vidEl=vid;src.stream=stream;
+      src.type='screen';src.vidEl=vid;src.stream=stream;
       src.active=true;src.label='screen';
-      stream.getVideoTracks()[0].addEventListener('ended',()=>{cleanupSource(slot);updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();setStatus(slot+' screen capture ended');});
-      updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
-      setStatus('screen capture active on '+slot);
-    }).catch(e=>{setStatus('screen capture cancelled');});
+      // resolve the slot by stream identity when the share ends — after an
+      // A↔B swap the original slot holds something else
+      stream.getVideoTracks()[0].addEventListener('ended',()=>{
+        const s=['A','B'].find(k=>sources[k].stream===stream);
+        if(!s) return;
+        cleanupSource(s);updatePreview(s);updateSrcNodeControls(s);updateSourcesAccordion();setStatus(s+' screen capture ended');
+      });
+      _srcReady(slot,'screen capture active on '+slot);
+    }).catch(e=>{if(_loadTok[slot]===tok){setStatus('screen capture cancelled');updateSourcePickState();}});
   } else if(type==='color'){
+    _commitSource(slot);src.type=type;
     src.active=true;src.label='color';src.color=slot==='A'?'#FF0000':'#0066FF';
-    updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+    _srcReady(slot);
   } else if(type==='pattern'){
+    _commitSource(slot);src.type=type;
     src.active=true;src.label='pattern';src.genParam={preset:slot==='A'?0:3,speed:0.5};
-    updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+    _srcReady(slot);
   } else if(type==='math'){
+    _commitSource(slot);src.type=type;
     src.active=true;src.label='math';src.genParam={preset:slot==='A'?0:3,speed:0.5};
-    updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+    _srcReady(slot);
   } else if(type==='text'){
+    _commitSource(slot);src.type=type;
     src.active=true;src.label='text';
     src.textParams={text:'m-or.ph',fontIndex:0,color:'#ffffff'};
-    updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+    _srcReady(slot);
   }
   updateSourcePickState();
 }
@@ -2313,17 +2382,25 @@ function makeVideoEl(){
   v.style.display='none';document.body.appendChild(v);
   return v;
 }
+function _dropVideoEl(v){
+  if(!v) return;
+  v.pause();v.srcObject=null;v.removeAttribute('src');try{v.load();}catch(e){}v.remove();
+}
 
 function cleanupSource(slot){
   const src=sources[slot];
   const wasUrl=src.type==='url';
   if(src.stream){src.stream.getTracks().forEach(t=>t.stop());src.stream=null;}
-  if(src.vidEl){src.vidEl.pause();src.vidEl.srcObject=null;src.vidEl.src='';src.vidEl.remove();src.vidEl=null;}
-  if(src.vid2El){src.vid2El.src='';src.vid2El.remove();src.vid2El=null;}
+  if(src.vidEl){_dropVideoEl(src.vidEl);src.vidEl=null;}
+  if(src.vid2El){_dropVideoEl(src.vid2El);src.vid2El=null;}
   if(src._blobUrl){URL.revokeObjectURL(src._blobUrl);src._blobUrl=null;}
   if(src._imgBlobUrl){URL.revokeObjectURL(src._imgBlobUrl);src._imgBlobUrl=null;}
+  if(src._bmp){src._bmp.close();src._bmp=null;}
+  src._bmpVid=null;src._xfading=false;src._txtCv=null;src._txtKey=null;
   if(src.offscreen&&src.offCtx) src.offCtx.clearRect(0,0,src.offscreen.width,src.offscreen.height);
   src._imgEl=null; src.imgFx=null;
+  // a stale picker kept offering (and could start) the previous cam list
+  src.webcamPicker=false;src.webcamStartCam=null;src.webcamDevices=null;src.webcamDeviceId=null;
   src.active=false;src.type=null;src.label='empty';src.offscreen=null;src.offCtx=null;
   if(wasUrl) resetMixCanvas();
   setTimeout(updateSourcesAccordion,0);
@@ -2500,14 +2577,16 @@ function buildWebcamControls(slot,src,ctrl){
     const sel=document.createElement('select');sel.style.cssText='width:100%;background:#000;color:#fff;border:2px solid #000;font-family:var(--chrome);font-size:9px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;padding:3px 5px;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;';
     cams.forEach(cam=>{const opt=document.createElement('option');opt.value=cam.deviceId;opt.textContent=(cam.label||'camera '+cams.indexOf(cam)).replace(/\s+\(.*?\)/g,'').substring(0,28);if(src.webcamDeviceId&&cam.deviceId===src.webcamDeviceId)opt.selected=true;sel.appendChild(opt);});
     sel.onchange=()=>{
-      if(src.stream){src.stream.getTracks().forEach(t=>t.stop());src.stream=null;}
-      if(src.vidEl){src.vidEl.pause();src.vidEl.srcObject=null;src.vidEl.src='';src.vidEl.remove();src.vidEl=null;}
-      const deviceId=sel.value;
+      if(src.webcamPicker){if(src.webcamStartCam)src.webcamStartCam(sel.value);return;}
+      // keep the current camera running until the new one opens
+      const deviceId=sel.value,tok=++_loadTok[slot];
       navigator.mediaDevices.getUserMedia({video:{deviceId:{exact:deviceId}},audio:false}).then(stream=>{
+        if(_loadTok[slot]!==tok||src.type!=='webcam'){_stopStream(stream);return;}
+        _stopStream(src.stream);_dropVideoEl(src.vidEl);
         const vid=makeVideoEl();vid.srcObject=stream;vid.play().catch(()=>{});
         src.vidEl=vid;src.stream=stream;src.active=true;src.label='webcam';src.webcamDeviceId=deviceId;src.webcamPicker=false;
         updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();setStatus('camera switched on '+slot);
-      }).catch(()=>{setStatus('camera denied');});
+      }).catch(()=>{if(_loadTok[slot]===tok)setStatus('camera denied');});
     };
     if(src.webcamPicker){
       const loadBtn=document.createElement('button');loadBtn.className='tbtn';loadBtn.style.cssText='width:100%;margin-top:3px;';loadBtn.textContent='load';
@@ -2584,6 +2663,12 @@ const _noiseTiles=(()=>{
   return tiles;
 })();
 
+// patterns are created once per thumbnail canvas + tile (createPattern ran on
+// every redraw of an empty slot)
+function _tilePattern(cv,ctx,tiles,i){
+  if(!cv._pats||cv._pats.tiles!==tiles){cv._pats=new Array(tiles.length);cv._pats.tiles=tiles;}
+  return cv._pats[i]||(cv._pats[i]=ctx.createPattern(tiles[i],'repeat'));
+}
 function drawEmptySource(cv,label){
   if(label==='B'){ drawEmptySourceB(cv); return; }
   syncCanvasSize(cv);
@@ -2593,9 +2678,7 @@ function drawEmptySource(cv,label){
 
   // animated noise: cycle through pre-baked tiles at ~12fps feel
   const tileIdx=Math.floor(performance.now()/80)%_noiseTiles.length;
-  const tile=_noiseTiles[tileIdx];
-  const pat=ctx.createPattern(tile,'repeat');
-  ctx.fillStyle=pat;
+  ctx.fillStyle=_tilePattern(cv,ctx,_noiseTiles,tileIdx);
   ctx.fillRect(0,0,w,h);
 
   // dim overlay so text is readable
@@ -2667,9 +2750,7 @@ function drawEmptySourceB(cv){
 
   // scanline static — faster cycle than A (60ms) for a different feel
   const tileIdx=Math.floor(performance.now()/60)%_scanlineTiles.length;
-  const tile=_scanlineTiles[tileIdx];
-  const pat=ctx.createPattern(tile,'repeat');
-  ctx.fillStyle=pat;
+  ctx.fillStyle=_tilePattern(cv,ctx,_scanlineTiles,tileIdx);
   ctx.fillRect(0,0,w,h);
 
   // slightly lighter overlay than A so the horizontal banding reads through
@@ -3747,22 +3828,52 @@ document.addEventListener('click',e=>{
   }
 });
 
+// which slot owns this video element right now (A↔B swap moves elements)
+function _srcOfVid(v){
+  for(const k of ['A','B']){const s=sources[k];if(s.vidEl===v||s.vid2El===v)return s;}
+  return null;
+}
+// loop crossfade: vid2 stays paused (no second decode) until the playing
+// element enters its last FADE_DUR seconds, then starts at 0 underneath;
+// when the fade completes the two swap roles and the old one is parked
+function _vidEndXfade(src){
+  const a=src.vidEl,b=src.vid2El;
+  src._xfading=false;
+  if(!a) return;
+  if(b&&!b.paused&&b.readyState>=2){
+    src.vidEl=b;src.vid2El=a;
+    a.pause();try{a.currentTime=0;}catch(e){}
+  } else {
+    // no partner ready (short clip / still buffering) — plain loop
+    if(b&&!b.paused){b.pause();try{b.currentTime=0;}catch(e){}}
+    try{a.currentTime=0;}catch(e){}
+    a.play().catch(()=>{});
+  }
+}
+function _onVidEnded(e){
+  const v=e.target,src=_srcOfVid(v);
+  if(!src) return;
+  if(src.vidEl===v) _vidEndXfade(src);
+  else {v.pause();try{v.currentTime=0;}catch(err){}}
+}
+
 function loadFile(s,inp){
   if(!inp.files[0]){updateSourcePickState();return;}
   const f=inp.files[0];
+  // reset so picking the same file again still fires change
+  inp.value='';
   const src=sources[s];
-  if(src._blobUrl){URL.revokeObjectURL(src._blobUrl);src._blobUrl=null;}
+  ++_loadTok[s];
+  _commitSource(s);
   const url=URL.createObjectURL(f);
   src._blobUrl=url;
-  if(src.vidEl){src.vidEl.pause();src.vidEl.srcObject=null;src.vidEl.src='';src.vidEl.remove();src.vidEl=null;}
-  if(src.vid2El){src.vid2El.src='';src.vid2El.remove();src.vid2El=null;}
-  if(src.stream){src.stream.getTracks().forEach(t=>t.stop());src.stream=null;}
-  src.offscreen=null;src.offCtx=null;
   const vid=makeVideoEl();
   const vid2=makeVideoEl();
+  vid2.autoplay=false;vid2.preload='auto';
   vid.src=url;vid.load();vid.play().catch(()=>{});
   vid2.src=url;vid2.load();
-  vid.addEventListener('ended',()=>{vid.currentTime=0;vid.play().catch(()=>{});});
+  vid.addEventListener('ended',_onVidEnded);
+  vid2.addEventListener('ended',_onVidEnded);
   src.vidEl=vid;src.vid2El=vid2;
   src.type='file';
   src.active=true;
@@ -3778,20 +3889,16 @@ function loadImageFile(s,inp){
   if(!inp.files[0]){updateSourcePickState();return;}
   const f=inp.files[0];
   const src=sources[s];
-  if(src._imgBlobUrl){URL.revokeObjectURL(src._imgBlobUrl);src._imgBlobUrl=null;}
+  const tok=++_loadTok[s];
   const url=URL.createObjectURL(f);
-  src._imgBlobUrl=url;
-  if(src.vidEl){src.vidEl.pause();src.vidEl.srcObject=null;src.vidEl.src='';src.vidEl.remove();src.vidEl=null;}
-  if(src.vid2El){src.vid2El.src='';src.vid2El.remove();src.vid2El=null;}
-  if(src.stream){src.stream.getTracks().forEach(t=>t.stop());src.stream=null;}
-  src.offscreen=null;src.offCtx=null;
-  src._imgEl=null;
   // reset input so the same file can be re-selected or replaced
   inp.value='';
   const img=new Image();
   img.onload=()=>{
-    // image decoded into canvas — blob URL no longer needed
-    if(src._imgBlobUrl){URL.revokeObjectURL(src._imgBlobUrl);src._imgBlobUrl=null;}
+    // image decoded — blob URL no longer needed
+    URL.revokeObjectURL(url);
+    if(_loadTok[s]!==tok) return;
+    _commitSource(s);
     src._imgEl=img;
     src.offscreen=document.createElement('canvas');
     src.offscreen.width=W;src.offscreen.height=H;
@@ -3800,12 +3907,13 @@ function loadImageFile(s,inp){
     src.active=true;
     src.label=f.name.substring(0,18);
     src.type='image';
-    // preserve existing fx settings on replace, init fresh otherwise
-    if(!src.imgFx) src.imgFx={r1:0,r2:-1,r2active:false,r2start:0,speed:0.5,size:1.0,progress:1,triggered:false,startTime:0,direction:1,rotAngle:0,rotDir:1,_dissolveMap:null,_dissolveW:0,_dissolveH:0};
-    else { src.imgFx.progress=1; src.imgFx.triggered=false; src.imgFx.r2active=false; src.imgFx._dissolveMap=null; }
+    // slotFx (size/rotate/fade) carries over on replace; the old imgFx seed
+    // (size 1.0 = 200%) made every new image appear 2× zoomed
+    if(!src.slotFx) src.slotFx=_defaultSlotFx();
     updatePreview(s);updateSrcNodeControls(s);updateSourcePickState();updateSourcesAccordion();
     setStatus('image loaded on '+s+': '+f.name.substring(0,24));
   };
+  img.onerror=()=>{URL.revokeObjectURL(url);if(_loadTok[s]===tok){setStatus('could not decode image');updateSourcePickState();}};
   img.src=url;
 }
 
@@ -7944,7 +8052,9 @@ const _ARCHIVE_MSGS=[
   'converting magnetic memories to light',
   'time base correcting',
 ];
-async function loadArchiveVideo(src,slot,url){
+async function loadArchiveVideo(src,slot,url,tok){
+  if(tok===undefined) tok=++_loadTok[slot];
+  if(_loadTok[slot]!==tok) return; // superseded while the URL was resolving
   clearTimeout(setStatus._t);
   setStatus._noReset=true;
 
