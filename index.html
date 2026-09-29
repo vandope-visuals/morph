@@ -6357,6 +6357,16 @@ function openPicker(){}
 function closePicker(){}
 function maybeClose(){}
 
+let _midiAccess=null;
+// (re)attach handlers to every input; called on toggle and on hot-plug
+function _midiBind(){
+  const lbl=document.getElementById('mlbl');
+  if(!_midiAccess){if(lbl)lbl.textContent='no MIDI';return [];}
+  const ins=[..._midiAccess.inputs.values()];
+  ins.forEach(i=>{i.onmidimessage=state.midiOn?onMidi:null;});
+  if(lbl) lbl.textContent=state.midiOn&&ins.length?ins[0].name.substring(0,14):'no MIDI';
+  return ins;
+}
 function toggleMidi(){
   state.midiOn=!state.midiOn;
   const btn=document.getElementById('btn-midi');
@@ -6366,24 +6376,29 @@ function toggleMidi(){
     if(dot) dot.classList.add('on');
     if(navigator.requestMIDIAccess){
       navigator.requestMIDIAccess().then(a=>{
-        const ins=[...a.inputs.values()];
-        if(ins.length){
-          document.getElementById('mlbl').textContent=ins[0].name.substring(0,14);
-          ins.forEach(i=>{i.onmidimessage=onMidi;});
-          setStatus('MIDI: '+ins[0].name);
-        } else setStatus('no MIDI devices');
+        _midiAccess=a;
+        a.onstatechange=()=>{const n=_midiBind().length;if(state.midiOn)setStatus(n?'MIDI: '+n+' input'+(n>1?'s':''):'no MIDI devices');};
+        if(!state.midiOn){_midiBind();return;} // toggled off while the prompt was up
+        const ins=_midiBind();
+        if(ins.length) setStatus('MIDI: '+ins[0].name);
+        else setStatus('no MIDI devices');
       }).catch(()=>setStatus('MIDI denied'));
     }
   } else {
     if(btn){btn.textContent='MIDI off';btn.classList.remove('on');}
     if(dot) dot.classList.remove('on');
+    // detach — "off" used to only change the UI while CC7 kept moving the fader
+    _midiBind();
+    if(_midiAccess) _midiAccess.onstatechange=null;
     document.getElementById('mlbl').textContent='no MIDI';
   }
 }
 
 function onMidi(msg){
+  if(!state.midiOn) return;
   const[status,cc,val]=msg.data;
-  if(status===176&&cc===7){
+  // CC7 on any channel (status 0xB0–0xBF)
+  if((status&0xF0)===0xB0&&cc===7){
     const v=Math.round(val/127*100);
     setXfade(v);document.getElementById('mxf').value=v;
   }
