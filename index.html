@@ -3818,7 +3818,9 @@ document.addEventListener('keydown',e=>{
 });
 
 
-function setXfade(v){
+// fromMod: modulation-driven (every frame) — skip when unchanged and don't flash the MIDI dot
+function setXfade(v,fromMod){
+  if(fromMod&&v===state.xfade) return;
   state.xfade=v;
   const p=v+'%';
   document.getElementById('mxf-v').textContent=p;
@@ -3826,7 +3828,7 @@ function setXfade(v){
   document.getElementById('xf-thumb').style.left=p;
   const mxf=document.getElementById('mxf');
   if(mxf&&+mxf.value!==v) mxf.value=v;
-  flashMidi();
+  if(!fromMod) flashMidi();
 }
 
 (function(){
@@ -5132,7 +5134,7 @@ function tickXYPads(){
 function applyLfoTargetNamed(target,val){
   if(!target||!target.targetId) return;
   const{targetId,targetKnob}=target;
-  if(targetId==='xfade'){setXfade(Math.round(val*100));document.getElementById('mxf').value=Math.round(val*100);return;}
+  if(targetId==='xfade'){setXfade(Math.round(val*100),true);return;}
   const tmod=state.modules.find(m=>m.id===targetId);
   if(!tmod) return;
   if(targetKnob==='r'||targetKnob==='g'||targetKnob==='b'){if(!tmod.channelGain)tmod.channelGain={r:1,g:1,b:1};tmod.channelGain[targetKnob]=val;return;}
@@ -5321,11 +5323,7 @@ function tickLFOs(){
 function applyLfoTarget(mod,val){
   if(!mod.lfoTarget) return;
   const{targetId,targetKnob}=mod.lfoTarget;
-  if(targetId==='xfade'){
-    setXfade(Math.round(val*100));
-    document.getElementById('mxf').value=Math.round(val*100);
-    return;
-  }
+  if(targetId==='xfade'){setXfade(Math.round(val*100),true);return;}
   const target=state.modules.find(m=>m.id===targetId);
   if(!target) return;
   if(targetKnob==='r'||targetKnob==='g'||targetKnob==='b'){
