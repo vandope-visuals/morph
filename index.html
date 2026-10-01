@@ -398,16 +398,6 @@ html,body{
     3px 0 var(--paper),-3px 0 var(--paper),4px 0 var(--paper),-4px 0 var(--paper),
     5px 0 var(--paper),-5px 0 var(--paper),6px 0 var(--paper),-6px 0 var(--paper);
 }
-/* The swap A↔B button next to plabel */
-.left > div:first-child > button{
-  font-family:var(--chrome)!important;font-size:9px!important;font-weight:700!important;
-  letter-spacing:0.04em!important;text-transform:uppercase!important;
-  color:var(--ink)!important;background:var(--paper)!important;
-  border:2px solid var(--ink)!important;border-radius:0!important;
-  padding:3px 7px!important;
-  text-shadow:none!important;
-}
-.left > div:first-child > button:hover{background:var(--ink)!important;color:var(--paper)!important;}
 
 /* SOURCES — A and B viewports (TV screens, black) */
 .src-slots{display:flex;flex-direction:column;gap:6px;flex-shrink:0;}
@@ -1554,6 +1544,26 @@ body.tv[data-tvch="4"] .bot-c{grid-area:ctl;justify-content:center;}
 body.tv[data-tvch="4"] .chain-marquee-wrap{display:none;}
 body.tv[data-tvch="4"] .bot-r{grid-area:meta;}
 
+/* ============================================================
+   ACCESSIBILITY — real buttons keep the old div look (zero-specificity
+   reset so every component rule still wins); 1-bit focus ring.
+   ============================================================ */
+:where(button.mitem,button.fx-key,button.src-empty,button.bypass-btn,button.pip-sz,button.tc-tab,button.chain-token,button.plabel,button#pip-close){
+  -webkit-appearance:none;appearance:none;
+  font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit;line-height:inherit;text-align:inherit;
+  background:none;border:0;
+}
+:where(button.mitem,button.src-empty,button.plabel){width:100%;}
+/* inline token: as tall as the old inline span (a button is inline-block) */
+:where(button.chain-token){line-height:normal;}
+:focus-visible{outline:2px dotted var(--ink);outline-offset:2px;}
+.mitem:focus-visible,#tut-card .tc-tab:focus-visible{outline-offset:-4px;outline-color:currentColor;}
+.fx-key:focus-visible{outline-offset:-5px;outline-color:currentColor;}
+.knob-track:focus-visible{outline-offset:1px;}
+.src-empty:focus-visible{outline-offset:-4px;outline-color:var(--paper);}
+#pip-window :focus-visible{outline-color:var(--paper);}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;}
+
 /* clip the CRT overlay to the TV stage */
 body.tv .crt-overlay{
   inset:auto;
@@ -1665,15 +1675,15 @@ body.crt .app{
 <div class="app" oncontextmenu="return false">
 
 <header class="topbar">
-  <button class="tbtn" id="btn-theme" onclick="toggleTheme()" data-tip="theme"><svg id="sw-theme" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-theme-knob" x="12" y="2" width="8" height="8" fill="currentColor"/></svg>&#9681; dark</button>
-  <button class="tbtn" id="btn-crt" onclick="toggleCRT()" data-tip="crt"><svg id="sw-crt" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-crt-knob" x="12" y="2" width="8" height="8" fill="currentColor"/></svg>&#9707; crt</button>
+  <button class="tbtn" id="btn-theme" onclick="toggleTheme()" data-tip="theme" role="switch" aria-checked="true" aria-label="dark mode"><svg id="sw-theme" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-theme-knob" x="12" y="2" width="8" height="8" fill="currentColor"/></svg>&#9681; dark</button>
+  <button class="tbtn" id="btn-crt" onclick="toggleCRT()" data-tip="crt" role="switch" aria-checked="true" aria-label="crt effect"><svg id="sw-crt" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-crt-knob" x="12" y="2" width="8" height="8" fill="currentColor"/></svg>&#9707; crt</button>
   <div class="tdiv"></div>
   <div class="tstatus" data-tip="statusbar"><div class="sdot"></div><span id="st">ready</span></div>
   <div class="tright">
     <button class="tbtn" onclick="startTutorial()" data-tip="tutorial" id="btn-tutorial">? tutorial</button>
     <button class="tbtn" id="btn-pip" onclick="togglePip()" data-tip="pip">output popup</button>
     <button class="tbtn" id="btn-out" onclick="openOutput()" data-tip="outputwindow">output window</button>
-    <button class="tbtn" id="btn-tv" onclick="toggleTV()" data-tip="tv"><svg id="sw-tv" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-tv-knob" x="2" y="2" width="8" height="8" fill="currentColor"/></svg>hd</button>
+    <button class="tbtn" id="btn-tv" onclick="toggleTV()" data-tip="tv" role="switch" aria-checked="false" aria-label="tv mode (640×480)"><svg id="sw-tv" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-tv-knob" x="2" y="2" width="8" height="8" fill="currentColor"/></svg>hd</button>
     <button class="tbtn" id="btn-fs" onclick="toggleFS()" data-tip="fullscreen">fullscreen</button>
   </div>
 </header>
@@ -1681,21 +1691,21 @@ body.crt .app{
 <aside class="left">
   <!-- SOURCES LIST: left panel -->
   <div id="left-sources" style="display:flex;flex-direction:column;flex-shrink:0;overflow:hidden;transition:max-height 0.18s ease,opacity 0.18s ease;max-height:400px;opacity:1;">
-    <div class="plabel" id="left-sources-hdr" data-tip="inputs" style="cursor:pointer;" onclick="toggleLeftSources()">
+    <button type="button" class="plabel" id="left-sources-hdr" data-tip="inputs" style="cursor:pointer;" onclick="toggleLeftSources()" aria-expanded="true" aria-controls="left-src-items">
       INPUTS
-    </div>
+    </button>
     <div id="left-src-pick-hint" style="display:none;font-family:var(--ticker);font-size:13px;color:var(--ink);background:var(--paper);padding:5px 8px;border:2px solid var(--ink);border-top:0;text-transform:lowercase;"><span style="display:inline;animation:blink 1s steps(2,end) infinite;">picking for <b id="left-src-pick-for" style="color:var(--paper);background:var(--ink);padding:0 3px;"></b></span></div>
     <div id="left-src-items" data-collapsed="0">
-      <div class="mitem src-item" onclick="pickSource('video')"><span class="mitem-icon">⊟</span><span class="mitem-name">video</span></div>
-      <div class="mitem src-item" onclick="pickSource('image')"><span class="mitem-icon">⊠</span><span class="mitem-name">image</span></div>
-      <div class="mitem src-item" onclick="pickSource('text')"><span class="mitem-icon">T</span><span class="mitem-name">text</span></div>
-      <div class="mitem src-item" onclick="pickSource('webcam')"><span class="mitem-icon">◉</span><span class="mitem-name">webcam</span></div>
-      <div class="mitem src-item" onclick="pickSource('color')"><span class="mitem-icon">■</span><span class="mitem-name">solid color</span></div>
-      <div class="mitem src-item" onclick="pickSource('screen')"><span class="mitem-icon">▣</span><span class="mitem-name">screen capture</span></div>
-      <div class="mitem src-item" onclick="pickSource('url')"><span class="mitem-icon">⊞</span><span class="mitem-name">archive</span></div>
-      <div class="mitem src-item" onclick="pickSource('videos')"><span class="mitem-icon"><svg width="12" height="12" viewBox="0 0 12 12" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges" style="vertical-align:middle;"><rect x="0" y="0" width="12" height="12" fill="currentColor"/><rect x="1" y="1" width="10" height="10" fill="var(--paper)"/><rect x="2" y="2" width="2" height="2" fill="currentColor"/><rect x="8" y="2" width="2" height="2" fill="currentColor"/><rect x="5" y="5" width="2" height="2" fill="currentColor"/><rect x="2" y="8" width="2" height="2" fill="currentColor"/><rect x="8" y="8" width="2" height="2" fill="currentColor"/></svg></span><span class="mitem-name">random</span></div>
-      <div class="mitem src-item" onclick="pickSource('pattern')"><span class="mitem-icon">▦</span><span class="mitem-name">moving pattern</span></div>
-      <div class="mitem src-item" onclick="pickSource('math')"><span class="mitem-icon">∿</span><span class="mitem-name">mathematical</span></div>
+      <button type="button" class="mitem src-item" onclick="pickSource('video')"><span class="mitem-icon">⊟</span><span class="mitem-name">video</span></button>
+      <button type="button" class="mitem src-item" onclick="pickSource('image')"><span class="mitem-icon">⊠</span><span class="mitem-name">image</span></button>
+      <button type="button" class="mitem src-item" onclick="pickSource('text')"><span class="mitem-icon">T</span><span class="mitem-name">text</span></button>
+      <button type="button" class="mitem src-item" onclick="pickSource('webcam')"><span class="mitem-icon">◉</span><span class="mitem-name">webcam</span></button>
+      <button type="button" class="mitem src-item" onclick="pickSource('color')"><span class="mitem-icon">■</span><span class="mitem-name">solid color</span></button>
+      <button type="button" class="mitem src-item" onclick="pickSource('screen')"><span class="mitem-icon">▣</span><span class="mitem-name">screen capture</span></button>
+      <button type="button" class="mitem src-item" onclick="pickSource('url')"><span class="mitem-icon">⊞</span><span class="mitem-name">archive</span></button>
+      <button type="button" class="mitem src-item" onclick="pickSource('videos')"><span class="mitem-icon"><svg width="12" height="12" viewBox="0 0 12 12" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges" style="vertical-align:middle;"><rect x="0" y="0" width="12" height="12" fill="currentColor"/><rect x="1" y="1" width="10" height="10" fill="var(--paper)"/><rect x="2" y="2" width="2" height="2" fill="currentColor"/><rect x="8" y="2" width="2" height="2" fill="currentColor"/><rect x="5" y="5" width="2" height="2" fill="currentColor"/><rect x="2" y="8" width="2" height="2" fill="currentColor"/><rect x="8" y="8" width="2" height="2" fill="currentColor"/></svg></span><span class="mitem-name">random</span></button>
+      <button type="button" class="mitem src-item" onclick="pickSource('pattern')"><span class="mitem-icon">▦</span><span class="mitem-name">moving pattern</span></button>
+      <button type="button" class="mitem src-item" onclick="pickSource('math')"><span class="mitem-icon">∿</span><span class="mitem-name">mathematical</span></button>
     </div>
   </div>
 
@@ -1704,7 +1714,7 @@ body.crt .app{
     <div class="src-slot" id="slotA" style="display:none;">
       <div class="src-bar"></div>
       <canvas class="src-preview-cv" id="prev-cv-a"></canvas>
-      <div class="src-empty" id="empty-a" onclick="startPickMode('A')" style="cursor:pointer;"><div class="src-empty-id">A</div><div class="src-empty-hint">no source</div></div>
+      <button type="button" class="src-empty" id="empty-a" onclick="startPickMode('A')" style="cursor:pointer;" aria-label="pick a source for A"><span class="src-empty-id">A</span><span class="src-empty-hint">no source</span></button>
       <div class="src-tag">A</div>
     </div>
     <div id="left-swap-row" style="display:none;align-items:center;justify-content:center;padding:2px 0;">
@@ -1713,7 +1723,7 @@ body.crt .app{
     <div class="src-slot" id="slotB" style="display:none;">
       <div class="src-bar"></div>
       <canvas class="src-preview-cv" id="prev-cv-b"></canvas>
-      <div class="src-empty" id="empty-b" onclick="startPickMode('B')" style="cursor:pointer;"><div class="src-empty-id">B</div><div class="src-empty-hint">no source</div></div>
+      <button type="button" class="src-empty" id="empty-b" onclick="startPickMode('B')" style="cursor:pointer;" aria-label="pick a source for B"><span class="src-empty-id">B</span><span class="src-empty-hint">no source</span></button>
       <div class="src-tag">B</div>
     </div>
   </div>
@@ -1800,7 +1810,7 @@ body.crt .app{
         <div class="xf-wrap">
           <div class="xf-row">
             <span class="xfl a">A</span>
-            <div class="xf-track" id="xf-track">
+            <div class="xf-track" id="xf-track" role="slider" tabindex="0" aria-label="mixer crossfade a/b" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
               <div class="xf-bg"></div>
               <div class="xf-fill" id="xf-fill" style="width:50%;"></div>
               <div class="xf-thumb" id="xf-thumb" style="left:50%;"></div>
@@ -1832,27 +1842,27 @@ body.crt .app{
   <div class="mod-list">
     <div id="pick-mode-banner" style="display:none;font-family:var(--ticker);font-size:13px;color:var(--ink);background:var(--paper);padding:5px 8px;border:2px solid var(--ink);border-bottom:2px solid var(--ink);text-transform:lowercase;position:sticky;top:0;z-index:10;"><span style="display:inline;animation:blink 1s steps(2,end) infinite;">pick a source first to use effects</span></div>
     <div class="sec-lbl" id="proc-sec-lbl" data-tip="processors">processors</div>
-    <div class="mitem" onclick="addModule('keyer','processor','#f97316')"><span class="mitem-icon">⬡</span><span class="mitem-name">keyer</span></div>
-    <div class="mitem" onclick="addModule('color','processor','#f97316')"><span class="mitem-icon">◑</span><span class="mitem-name">color</span></div>
-    <div class="mitem" onclick="addModule('geometry','processor','#f97316')"><span class="mitem-icon">◻</span><span class="mitem-name">geometry</span></div>
-    <div class="mitem mitem-heavy" data-heavy="1" onclick="addModule('feedback','processor','#f97316')"><span class="mitem-icon">∞</span><span class="mitem-name">feedback</span><span class="mitem-heavy-badge">heavy</span></div>
-    <div class="mitem mitem-heavy" data-heavy="1" onclick="addModule('pixelops','processor','#f97316')"><span class="mitem-icon">▦</span><span class="mitem-name">pixel operations</span><span class="mitem-heavy-badge">heavy</span></div>
-    <div class="mitem mitem-heavy" data-heavy="1" onclick="addModule('ascii','processor','#f97316')"><span class="mitem-icon">⌨</span><span class="mitem-name">ascii</span><span class="mitem-heavy-badge">heavy</span></div>
+    <button type="button" class="mitem" onclick="addModule('keyer','processor','#f97316')"><span class="mitem-icon">⬡</span><span class="mitem-name">keyer</span></button>
+    <button type="button" class="mitem" onclick="addModule('color','processor','#f97316')"><span class="mitem-icon">◑</span><span class="mitem-name">color</span></button>
+    <button type="button" class="mitem" onclick="addModule('geometry','processor','#f97316')"><span class="mitem-icon">◻</span><span class="mitem-name">geometry</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('feedback','processor','#f97316')"><span class="mitem-icon">∞</span><span class="mitem-name">feedback</span><span class="mitem-heavy-badge">heavy</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('pixelops','processor','#f97316')"><span class="mitem-icon">▦</span><span class="mitem-name">pixel operations</span><span class="mitem-heavy-badge">heavy</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('ascii','processor','#f97316')"><span class="mitem-icon">⌨</span><span class="mitem-name">ascii</span><span class="mitem-heavy-badge">heavy</span></button>
     <div class="sec-lbl" data-tip="glitch">glitch</div>
-    <div class="mitem" onclick="addModule('vhs','glitch','#e11d48')"><span class="mitem-icon">▷</span><span class="mitem-name">VHS</span></div>
-    <div class="mitem" onclick="addModule('signalnoise','glitch','#e11d48')"><span class="mitem-icon">⣿</span><span class="mitem-name">signal noise</span></div>
-    <div class="mitem" onclick="addModule('rowshift','glitch','#e11d48')"><span class="mitem-icon">≡</span><span class="mitem-name">row shift</span></div>
-    <div class="mitem mitem-heavy" data-heavy="1" onclick="addModule('datamosh','glitch','#e11d48')"><span class="mitem-icon">◧</span><span class="mitem-name">datamosh</span><span class="mitem-heavy-badge">heavy</span></div>
-    <div class="mitem mitem-heavy" data-heavy="1" onclick="addModule('blockcorrupt','glitch','#e11d48')"><span class="mitem-icon">▩</span><span class="mitem-name">block corrupt</span><span class="mitem-heavy-badge">heavy</span></div>
-    <div class="mitem mitem-heavy" data-heavy="1" onclick="addModule('pixelsort','glitch','#e11d48')"><span class="mitem-icon">↕</span><span class="mitem-name">pixel sort</span><span class="mitem-heavy-badge">heavy</span></div>
+    <button type="button" class="mitem" onclick="addModule('vhs','glitch','#e11d48')"><span class="mitem-icon">▷</span><span class="mitem-name">VHS</span></button>
+    <button type="button" class="mitem" onclick="addModule('signalnoise','glitch','#e11d48')"><span class="mitem-icon">⣿</span><span class="mitem-name">signal noise</span></button>
+    <button type="button" class="mitem" onclick="addModule('rowshift','glitch','#e11d48')"><span class="mitem-icon">≡</span><span class="mitem-name">row shift</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('datamosh','glitch','#e11d48')"><span class="mitem-icon">◧</span><span class="mitem-name">datamosh</span><span class="mitem-heavy-badge">heavy</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('blockcorrupt','glitch','#e11d48')"><span class="mitem-icon">▩</span><span class="mitem-name">block corrupt</span><span class="mitem-heavy-badge">heavy</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('pixelsort','glitch','#e11d48')"><span class="mitem-icon">↕</span><span class="mitem-name">pixel sort</span><span class="mitem-heavy-badge">heavy</span></button>
     <div class="sec-lbl" data-tip="modulators">modulators</div>
-    <div class="mitem" id="si-oscillator" onclick="addModule('LFO','modulator','#000')"><span class="mitem-icon">◎</span><span class="mitem-name">oscillator</span></div>
-    <div class="mitem" onclick="addModule('envelope','modulator','#000')" style="display:none;"><span class="mitem-icon">◬</span><span class="mitem-name">envelope</span></div>
-    <div class="mitem" onclick="addModule('xypad','modulator','#000')"><span class="mitem-icon">⊕</span><span class="mitem-name">XY pad</span></div>
-    <div class="mitem" onclick="addModule('randwalk','modulator','#000')"><span class="mitem-icon">⟿</span><span class="mitem-name">random walk</span></div>
-    <div class="mitem mitem-heavy" data-heavy="1" onclick="addModule('sequencer','modulator','#000')"><span class="mitem-icon">▤</span><span class="mitem-name">sequencer</span><span class="mitem-heavy-badge">heavy</span></div>
-    <div class="mitem mitem-heavy" data-heavy="1" onclick="addModule('audio','modulator','#000')"><span class="mitem-icon">♪</span><span class="mitem-name">audio</span><span class="mitem-heavy-badge">heavy</span></div>
-    <div class="mitem mitem-heavy" data-heavy="1" onclick="addModule('perlin','modulator','#000')"><span class="mitem-icon">〜</span><span class="mitem-name">perlin noise</span><span class="mitem-heavy-badge">heavy</span></div>
+    <button type="button" class="mitem" id="si-oscillator" onclick="addModule('LFO','modulator','#000')"><span class="mitem-icon">◎</span><span class="mitem-name">oscillator</span></button>
+    <button type="button" class="mitem" onclick="addModule('envelope','modulator','#000')" style="display:none;"><span class="mitem-icon">◬</span><span class="mitem-name">envelope</span></button>
+    <button type="button" class="mitem" onclick="addModule('xypad','modulator','#000')"><span class="mitem-icon">⊕</span><span class="mitem-name">XY pad</span></button>
+    <button type="button" class="mitem" onclick="addModule('randwalk','modulator','#000')"><span class="mitem-icon">⟿</span><span class="mitem-name">random walk</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('sequencer','modulator','#000')"><span class="mitem-icon">▤</span><span class="mitem-name">sequencer</span><span class="mitem-heavy-badge">heavy</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('audio','modulator','#000')"><span class="mitem-icon">♪</span><span class="mitem-name">audio</span><span class="mitem-heavy-badge">heavy</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('perlin','modulator','#000')"><span class="mitem-icon">〜</span><span class="mitem-name">perlin noise</span><span class="mitem-heavy-badge">heavy</span></button>
   </div>
 </aside>
 
@@ -1865,7 +1875,7 @@ body.crt .app{
     <div class="chain-marquee-wrap" id="chain-marquee-wrap" data-tip="chainbar"><span class="chain-marquee" id="chain-marquee"></span></div>
     <div class="mxf-wrap" style="flex-shrink:0;" data-tip="crossfade">
       <div class="mxf-row"><span class="mxf-a">A</span><span class="mxf-v" id="mxf-v">50%</span><span class="mxf-b">B</span></div>
-      <input type="range" class="mxf-slider" id="mxf" min="0" max="100" value="50" step="1" oninput="setXfade(+this.value)">
+      <input type="range" class="mxf-slider" id="mxf" aria-label="crossfade a/b" min="0" max="100" value="50" step="1" oninput="setXfade(+this.value)">
     </div>
   </div>
   <div class="bot-r">
@@ -1922,16 +1932,16 @@ body.crt .app{
 <canvas id="cv-a" style="display:none;"></canvas>
 
 <!-- PiP floating window -->
-<div id="pip-window" style="display:none;">
+<div id="pip-window" style="display:none;" role="dialog" aria-label="output popup">
   <div id="pip-bar">
     <span id="pip-live">● LIVE</span>
     <span id="pip-fps-label">-- fps</span>
     <div id="pip-sizes">
-      <div class="pip-sz active" data-w="240" data-h="135" title="small"></div>
-      <div class="pip-sz" data-w="400" data-h="225" title="medium"></div>
-      <div class="pip-sz" data-w="560" data-h="315" title="large"></div>
+      <button type="button" class="pip-sz active" data-w="240" data-h="135" title="small" aria-label="small popup size"></button>
+      <button type="button" class="pip-sz" data-w="400" data-h="225" title="medium" aria-label="medium popup size"></button>
+      <button type="button" class="pip-sz" data-w="560" data-h="315" title="large" aria-label="large popup size"></button>
     </div>
-    <span id="pip-close" onclick="togglePip()">✕</span>
+    <button type="button" id="pip-close" onclick="togglePip()" aria-label="close output popup">✕</button>
   </div>
   <canvas id="pip-cv"></canvas>
 </div>
@@ -2254,6 +2264,7 @@ function _setLeftSourcesCollapsed(collapsed){
   const srcItems=document.getElementById('left-src-items');
   if(!srcItems) return;
   srcItems.dataset.collapsed = collapsed ? '1' : '0';
+  document.getElementById('left-sources-hdr')?.setAttribute('aria-expanded',String(!collapsed));
   _applySourcesState();
 }
 
@@ -2283,6 +2294,7 @@ function updateSourcePickState(){
     if(pickFor) pickFor.textContent = pickMode;
     // force items visible and enabled for picking
     const si=document.getElementById('left-src-items');
+    document.getElementById('left-sources-hdr')?.setAttribute('aria-expanded','true');
     if(si){si.dataset.collapsed='0';si.style.maxHeight='400px';si.style.overflow='';si.style.opacity='1';si.style.background='';si.style.pointerEvents='';si.querySelectorAll('.mitem').forEach(el=>{el.style.color='';el.style.borderColor='';});si.querySelectorAll('.mitem-icon,.mitem-name').forEach(el=>{el.style.opacity='';el.style.borderColor='';});}
     if(modList) modList.classList.add('pick-mode');
   } else {
@@ -2699,7 +2711,9 @@ function buildPatternControls(slot,src,ctrl){
   spdTrk.appendChild(spdBg);spdTrk.appendChild(spdFill);spdTrk.appendChild(spdThumb);
   spdRow.appendChild(spdHead);spdRow.appendChild(spdTrk);
   wrap.appendChild(spdRow);ctrl.appendChild(wrap);
-  const doSpd=e=>{const r=spdTrk.getBoundingClientRect();const v=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));src.genParam.speed=v;spdThumb.style.left=(v*100)+'%';spdVal.textContent=Math.round(v*100)+'%';};
+  const setSpd=v=>{src.genParam.speed=v;spdThumb.style.left=(v*100)+'%';spdVal.textContent=Math.round(v*100)+'%';};
+  const doSpd=e=>{const r=spdTrk.getBoundingClientRect();setSpd(Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)));};
+  _a11yFader(spdTrk,spdThumb,'speed',setSpd);
   spdTrk.addEventListener('mousedown',e=>{e.preventDefault();doSpd(e);const mm=ev=>doSpd(ev);const mu=()=>{document.removeEventListener('mousemove',mm);document.removeEventListener('mouseup',mu);};document.addEventListener('mousemove',mm);document.addEventListener('mouseup',mu);});
 }
 
@@ -2718,7 +2732,9 @@ function buildSlotFxControls(slot,src,ctrl){
     const fill=document.createElement('div');fill.className='knob-fill';fill.style.display='none';
     const thumb=document.createElement('div');thumb.className='knob-thumb';thumb.style.left=Math.round(initVal*100)+'%';
     trk.appendChild(bg);trk.appendChild(fill);trk.appendChild(thumb);row.appendChild(head);row.appendChild(trk);uWrap.appendChild(row);
-    const apply=e=>{const r=trk.getBoundingClientRect();const v=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));thumb.style.left=(v*100)+'%';val.textContent=fmt(v);onChange(v);};
+    const applyV=v=>{thumb.style.left=(v*100)+'%';val.textContent=fmt(v);onChange(v);};
+    const apply=e=>{const r=trk.getBoundingClientRect();applyV(Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)));};
+    _a11yFader(trk,thumb,label,applyV);
     trk.addEventListener('mousedown',e=>{e.preventDefault();apply(e);const mm=ev=>apply(ev);const mu=()=>{document.removeEventListener('mousemove',mm);document.removeEventListener('mouseup',mu);};document.addEventListener('mousemove',mm);document.addEventListener('mouseup',mu);});
   };
   mkFader('size',fx.size,v=>Math.round(v*200)+'%',v=>{fx.size=v;});
@@ -4266,6 +4282,7 @@ function setXfade(v,fromMod){
   }
 
   track.addEventListener('mousedown',e=>{drag=true;e.preventDefault();applyPos(e);});
+  _sliderKeys(track,()=>state.xfade/100,v=>{const p=Math.round(v*100);setXfade(p);document.getElementById('mxf').value=p;});
   document.addEventListener('mousemove',e=>{if(!drag)return;applyPos(e);});
   document.addEventListener('mouseup',()=>{drag=false;});
 })();
@@ -4692,7 +4709,7 @@ function toggleBypass(id){
   const node=document.querySelector('[data-mod-id="'+id+'"]');
   const btn=document.getElementById('bypass-'+id);
   if(node)node.classList.toggle('bypassed',!mod.enabled);
-  if(btn)btn.classList.toggle('off',!mod.enabled);
+  if(btn){btn.classList.toggle('off',!mod.enabled);btn.setAttribute('aria-pressed',String(!mod.enabled));}
 }
 
 /* ── FEEDBACK ENGINE ── */
@@ -6568,6 +6585,42 @@ function triggerEnv(modId){
   mod.envPhase=0; mod.envTriggered=true;
 }
 
+// set a module knob (drag and keyboard share this path)
+function setKnobValue(modId,which,v){
+  const mod=state.modules.find(m=>m.id===modId); if(!mod)return;
+  mod._uiInt=mod._uiPar=undefined; // let modulation rewrite the knob dom after a manual change
+  if(which==='int'){mod.intensity=v; const el=document.getElementById('int-val-'+modId); if(el)el.textContent=Math.round(v*100)+'%';}
+  else{mod.param=v; const el=document.getElementById('par-val-'+modId); if(el)el.textContent=Math.round(v*100)+'%';}
+  const fill=document.getElementById(which+'-fill-'+modId);
+  const thumb=document.getElementById(which+'-thumb-'+modId);
+  if(fill){fill.style.width=(v*100)+'%';}
+  if(thumb){thumb.style.left=(v*100)+'%';}
+  const trk=document.getElementById(which+'-track-'+modId);
+  if(trk) trk.setAttribute('aria-valuenow',Math.round(v*100));
+}
+// keyboard for a role="slider" element (value 0..1): arrows ±1%, shift/page ±10%, home/end
+function _sliderKeys(el,get,set){
+  el.addEventListener('keydown',e=>{
+    const step={ArrowRight:0.01,ArrowUp:0.01,ArrowLeft:-0.01,ArrowDown:-0.01,PageUp:0.1,PageDown:-0.1}[e.key];
+    let v=get();
+    if(step!==undefined) v+=e.shiftKey?step*10:step;
+    else if(e.key==='Home') v=0;
+    else if(e.key==='End') v=1;
+    else return;
+    e.preventDefault();e.stopPropagation();
+    v=Math.max(0,Math.min(1,+v.toFixed(2)));
+    set(v);
+    el.setAttribute('aria-valuenow',Math.round(v*100));
+  });
+}
+// slider semantics + keyboard for the source faders (thumb position is the value)
+function _a11yFader(trk,thumb,label,setV){
+  trk.setAttribute('role','slider');trk.tabIndex=0;trk.setAttribute('aria-label',label);
+  trk.setAttribute('aria-valuemin','0');trk.setAttribute('aria-valuemax','100');
+  trk.setAttribute('aria-valuenow',Math.round(parseFloat(thumb.style.left)||0));
+  _sliderKeys(trk,()=>(parseFloat(thumb.style.left)||0)/100,setV);
+}
+
 function makeKnobDrag(modId,which){
   return function(e){
     e.stopPropagation();
@@ -6577,14 +6630,7 @@ function makeKnobDrag(modId,which){
       if(!drag)return;
       const r=track.getBoundingClientRect();
       const v=Math.max(0,Math.min(1,+(((ev.clientX-r.left)/r.width).toFixed(2))));
-      const mod=state.modules.find(m=>m.id===modId); if(!mod)return;
-      mod._uiInt=mod._uiPar=undefined; // let modulation rewrite the knob dom after a manual drag
-      if(which==='int'){mod.intensity=v; const el=document.getElementById('int-val-'+modId); if(el)el.textContent=Math.round(v*100)+'%';}
-      else{mod.param=v; const el=document.getElementById('par-val-'+modId); if(el)el.textContent=Math.round(v*100)+'%';}
-      const fill=document.getElementById(which+'-fill-'+modId);
-      const thumb=document.getElementById(which+'-thumb-'+modId);
-      if(fill){fill.style.width=(v*100)+'%';}
-      if(thumb){thumb.style.left=(v*100)+'%';}
+      setKnobValue(modId,which,v);
     };
     const up=()=>{drag=false;document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);};
     document.addEventListener('mousemove',move);
@@ -6597,7 +6643,7 @@ function updateChainMarquee(){
   const nameMap={'LFO':'oscillator','blockcorrupt':'block corrupt','rowshift':'row shift','pixelsort':'pixel sort','signalnoise':'signal noise','xypad':'xy pad','perlin':'perlin noise','randwalk':'random walk'};
   const srcA=sources.A?.type||'—';
   const srcB=sources.B?.type||'—';
-  const modTokens=state.modules.map(m=>`<span class="chain-token chain-token-mod" data-mod-id="${m.id}" onclick="focusMod('${m.id}')" style="cursor:pointer;">${nameMap[m.name]||m.name}</span>`);
+  const modTokens=state.modules.map(m=>`<button type="button" class="chain-token chain-token-mod" data-mod-id="${m.id}" onclick="focusMod('${m.id}')" style="cursor:pointer;">${nameMap[m.name]||m.name}</button>`);
   const staticToken=t=>`<span class="chain-token">${t}</span>`;
   const sep='<span style="color:var(--ink);"> · </span>';
   const parts=[staticToken('['+srcA+' + '+srcB+']'),staticToken('mixer'),...modTokens,staticToken('master output')];
@@ -6652,22 +6698,22 @@ function buildModuleHTML(mod){
   const hasFxKeys=isColor||isGeom||isDmosh||isLfo||isFeedback||isPixelOps||isEnv||isAudio||isAscii||isKeyer||isRandWalk||isPerlin||isVhs||isBlockCorrupt||isRowShift||isPixelSort||isSignalNoise;
   const fxDef=isColor?COLOR_FX:isGeom?GEOM_FX:isLfo?LFO_SHAPES:isFeedback?FEEDBACK_FX:isPixelOps?PIXELOPS_FX:isAscii?ASCII_FX:isKeyer?KEYER_FX:isEnv?ENV_SHAPES:isAudio?AUDIO_FX:isRandWalk?RANDWALK_FX:isPerlin?PERLIN_FX:isVhs?VHS_FX:isBlockCorrupt?BLOCKCORRUPT_FX:isRowShift?ROWSHIFT_FX:isPixelSort?PIXELSORT_FX:isSignalNoise?SIGNALNOISE_FX:null;
   const fxKeys=isDmosh?DMOSH_FX.map(fx=>`
-    <div class="fx-key${(mod.activeFxQueue||[]).includes(fx.id)?' active':''}" data-fxid="${fx.id}" onclick="toggleDmoshFx('${mod.id}','${fx.id}')">
+    <button type="button" class="fx-key${(mod.activeFxQueue||[]).includes(fx.id)?' active':''}" data-fxid="${fx.id}" onclick="toggleDmoshFx('${mod.id}','${fx.id}')">
       <span>${fx.label[0]}</span><span>${fx.label[1]}</span>
-    </div>`).join('')
+    </button>`).join('')
   :fxDef?fxDef.map((fx,i)=>`
-    <div class="fx-key${i===mod.activeFx?' active':''}" onclick="setFx('${mod.id}',${i})">
+    <button type="button" class="fx-key${i===mod.activeFx?' active':''}" onclick="setFx('${mod.id}',${i})">
       <span>${fx.label[0]}</span>${fx.label[1]?`<span>${fx.label[1]}</span>`:'<span>&nbsp;</span>'}
-    </div>`).join(''):'';
+    </button>`).join(''):'';
 
   return `
     <div class="node-bar" style="background:${mod.color};opacity:0.4;"></div>
     <div class="node-head" id="head-${mod.id}" style="cursor:pointer;" onclick="selectMod('${mod.id}');">
       <span class="drag-handle">⠿</span>
-      <div class="bypass-btn${mod.enabled===false?' off':''}" id="bypass-${mod.id}" onclick="event.stopPropagation();toggleBypass('${mod.id}')" title="toggle bypass"><svg width="14" height="10" viewBox="0 0 14 10" fill="none" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges"><rect x="4" y="1" width="6" height="1" fill="currentColor"/><rect x="2" y="2" width="2" height="1" fill="currentColor"/><rect x="10" y="2" width="2" height="1" fill="currentColor"/><rect x="1" y="3" width="2" height="4" fill="currentColor"/><rect x="11" y="3" width="2" height="4" fill="currentColor"/><rect x="2" y="7" width="2" height="1" fill="currentColor"/><rect x="10" y="7" width="2" height="1" fill="currentColor"/><rect x="4" y="8" width="6" height="1" fill="currentColor"/><rect x="5" y="3" width="4" height="4" fill="currentColor"/><rect x="4" y="4" width="6" height="2" fill="currentColor"/></svg></div>
+      <button type="button" class="bypass-btn${mod.enabled===false?' off':''}" id="bypass-${mod.id}" onclick="event.stopPropagation();toggleBypass('${mod.id}')" title="toggle bypass" aria-label="bypass" aria-pressed="${mod.enabled===false}"><svg width="14" height="10" viewBox="0 0 14 10" fill="none" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges"><rect x="4" y="1" width="6" height="1" fill="currentColor"/><rect x="2" y="2" width="2" height="1" fill="currentColor"/><rect x="10" y="2" width="2" height="1" fill="currentColor"/><rect x="1" y="3" width="2" height="4" fill="currentColor"/><rect x="11" y="3" width="2" height="4" fill="currentColor"/><rect x="2" y="7" width="2" height="1" fill="currentColor"/><rect x="10" y="7" width="2" height="1" fill="currentColor"/><rect x="4" y="8" width="6" height="1" fill="currentColor"/><rect x="5" y="3" width="4" height="4" fill="currentColor"/><rect x="4" y="4" width="6" height="2" fill="currentColor"/></svg></button>
       <span class="mod-header-icon">${{keyer:'⬡',color:'◑',geometry:'◻',ascii:'⌨',feedback:'∞',datamosh:'◧',pixelops:'▦',LFO:'◎',envelope:'◬',sequencer:'▤',xypad:'⊕',perlin:'〜',randwalk:'⟿',audio:'♪',vhs:'▷',blockcorrupt:'▩',rowshift:'≡',pixelsort:'↕',signalnoise:'⣿'}[mod.name]||'◈'}</span>
       <span class="node-title" style="color:${mod.color};">${({'LFO':'oscillator','blockcorrupt':'block corrupt','rowshift':'row shift','pixelsort':'pixel sort','signalnoise':'signal noise','xypad':'xy pad','perlin':'perlin noise','randwalk':'random walk'}[mod.name]||mod.name)}</span>
-      <button class="node-remove" onclick="event.stopPropagation();removeModule('${mod.id}')">✕</button>
+      <button type="button" class="node-remove" onclick="event.stopPropagation();removeModule('${mod.id}')" aria-label="remove module">✕</button>
     </div>
     <div class="mod-controls${mod.open?' open':''}" id="ctrl-${mod.id}">
       <div class="mod-body">
@@ -6686,15 +6732,15 @@ function buildModuleHTML(mod){
         <div class="mod-ctrl-col">
           ${hasFxKeys?`<div class="fx-keys" id="fxkeys-${mod.id}">${fxKeys}</div>`:''}
           ${isSeq?`<div class="fx-keys" id="seq-presets-${mod.id}">${
-            Array.from({length:8},(_,i)=>`<div class="fx-key${i===(mod.seqPreset||0)?' active':''}" onclick="seqLoadPreset('${mod.id}',${i})" oncontextmenu="event.preventDefault();seqSavePreset('${mod.id}',${i})"><span>P${i+1}</span><span>&nbsp;</span></div>`).join('')
+            Array.from({length:8},(_,i)=>`<button type="button" class="fx-key${i===(mod.seqPreset||0)?' active':''}" onclick="seqLoadPreset('${mod.id}',${i})" oncontextmenu="event.preventDefault();seqSavePreset('${mod.id}',${i})"><span>P${i+1}</span><span>&nbsp;</span></button>`).join('')
           }</div>`:''}
           <div class="mod-knobs">
             <div class="knob-strip">
               <div class="knob-row">
-                <span class="knob-lbl">${isLfo||isAudio||isPerlin?'speed':isEnv?'attack':isSeq?'clock':'intensity'}</span>
+                <span class="knob-lbl" id="int-lbl-${mod.id}">${isLfo||isAudio||isPerlin?'speed':isEnv?'attack':isSeq?'clock':'intensity'}</span>
                 <span class="knob-val" id="int-val-${mod.id}">${Math.round(mod.intensity*100)}%</span>
               </div>
-              <div class="knob-track" id="int-track-${mod.id}">
+              <div class="knob-track" id="int-track-${mod.id}" role="slider" tabindex="0" aria-labelledby="int-lbl-${mod.id}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(mod.intensity*100)}">
                 <div class="knob-bg"></div>
                 <div class="knob-fill" id="int-fill-${mod.id}" style="width:${mod.intensity*100}%;background:${mod.color};"></div>
                 <div class="knob-thumb" id="int-thumb-${mod.id}" style="left:${mod.intensity*100}%;background:${mod.color};"></div>
@@ -6717,7 +6763,7 @@ function buildModuleHTML(mod){
                 }</span>
                 <span class="knob-val" id="par-val-${mod.id}">${Math.round(mod.param*100)}%</span>
               </div>
-              <div class="knob-track" id="par-track-${mod.id}">
+              <div class="knob-track" id="par-track-${mod.id}" role="slider" tabindex="0" aria-labelledby="param-lbl-${mod.id}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(mod.param*100)}">
                 <div class="knob-bg"></div>
                 <div class="knob-fill" id="par-fill-${mod.id}" style="width:${mod.param*100}%;background:${mod.color};"></div>
                 <div class="knob-thumb" id="par-thumb-${mod.id}" style="left:${mod.param*100}%;background:${mod.color};"></div>
@@ -6761,9 +6807,9 @@ function rebuildSlots(){
 
     const _intTrack=document.getElementById('int-track-'+mod.id);
     const _parTrack=document.getElementById('par-track-'+mod.id);
-    if(_intTrack) _intTrack.addEventListener('mousedown',makeKnobDrag(mod.id,'int'));
+    if(_intTrack){_intTrack.addEventListener('mousedown',makeKnobDrag(mod.id,'int'));_sliderKeys(_intTrack,()=>mod.intensity,v=>setKnobValue(mod.id,'int',v));}
     else console.error('morph: missing int-track for',mod.id);
-    if(_parTrack) _parTrack.addEventListener('mousedown',makeKnobDrag(mod.id,'par'));
+    if(_parTrack){_parTrack.addEventListener('mousedown',makeKnobDrag(mod.id,'par'));_sliderKeys(_parTrack,()=>mod.param,v=>setKnobValue(mod.id,'par',v));}
     else console.error('morph: missing par-track for',mod.id);
 
     // drag reorder — handle only
@@ -7001,6 +7047,7 @@ function openCapturePanel(){
   const panel=document.createElement('div');
   panel.id='capture-panel';
   panel.className='light';
+  panel.setAttribute('role','dialog');panel.setAttribute('aria-label','capture');
   const btnRect=document.getElementById('capture-open-btn').getBoundingClientRect();
   const zoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1;
   const panelW=Math.round(btnRect.width/zoom);
@@ -7019,7 +7066,7 @@ function openCapturePanel(){
   panel.innerHTML=`
     <div style="background:var(--paper);background-image:var(--stripes-h);background-repeat:repeat;border-bottom:2px solid var(--ink);height:22px;display:flex;align-items:center;justify-content:center;position:relative;">
       <span style="font-family:'Silkscreen',monospace;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;background:var(--paper);padding:1px 9px;">CAPTURE</span>
-      <button id="cap-close" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:var(--paper);border:2px solid var(--ink);font-family:'Silkscreen',monospace;font-size:10px;font-weight:700;cursor:pointer;width:16px;height:16px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;">✕</button>
+      <button type="button" id="cap-close" aria-label="close capture" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:var(--paper);border:2px solid var(--ink);font-family:'Silkscreen',monospace;font-size:10px;font-weight:700;cursor:pointer;width:16px;height:16px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;">✕</button>
     </div>
 
     <div style="padding:8px;display:flex;flex-direction:column;gap:8px;">
@@ -7632,7 +7679,7 @@ function _updateThemeSwitch(isDark){
   const knob=document.getElementById('sw-theme-knob');
   if(knob) knob.setAttribute('x', isDark?'12':'2');
   const btn=document.getElementById('btn-theme');
-  if(btn){btn.classList.toggle('on',isDark);btn.innerHTML='<svg id="sw-theme" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-theme-knob" x="'+(isDark?'12':'2')+'" y="2" width="8" height="8" fill="currentColor"/></svg>&#9681; '+(isDark?'dark':'light');}
+  if(btn){btn.classList.toggle('on',isDark);btn.setAttribute('aria-checked',String(isDark));btn.innerHTML='<svg id="sw-theme" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-theme-knob" x="'+(isDark?'12':'2')+'" y="2" width="8" height="8" fill="currentColor"/></svg>&#9681; '+(isDark?'dark':'light');}
 }
 function toggleTheme(){
   document.body.classList.toggle('dark');
@@ -7676,7 +7723,7 @@ function setTVChannel(n){
 }
 function _updateTVSwitch(on){
   const btn=document.getElementById('btn-tv');
-  if(btn){btn.classList.toggle('on',on);btn.innerHTML='<svg id="sw-tv" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-tv-knob" x="'+(on?'12':'2')+'" y="2" width="8" height="8" fill="currentColor"/></svg>'+(on?'sd':'hd');}
+  if(btn){btn.classList.toggle('on',on);btn.setAttribute('aria-checked',String(on));btn.innerHTML='<svg id="sw-tv" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-tv-knob" x="'+(on?'12':'2')+'" y="2" width="8" height="8" fill="currentColor"/></svg>'+(on?'sd':'hd');}
 }
 // stretch to fill the whole viewport: layout stays 640×480, only the
 // transform scales — X and Y independently (anamorphic). GPUs driving a
@@ -7737,7 +7784,7 @@ document.addEventListener('keydown',e=>{
 let _crtGlitchIv=null;
 function _updateCRTSwitch(on){
   const btn=document.getElementById('btn-crt');
-  if(btn){btn.classList.toggle('on',on);btn.innerHTML='<svg id="sw-crt" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-crt-knob" x="'+(on?'12':'2')+'" y="2" width="8" height="8" fill="currentColor"/></svg>&#9707; crt';}
+  if(btn){btn.classList.toggle('on',on);btn.setAttribute('aria-checked',String(on));btn.innerHTML='<svg id="sw-crt" width="22" height="12" viewBox="0 0 22 12" shape-rendering="crispEdges" style="display:inline-block;vertical-align:middle;margin-right:3px;"><rect x="0" y="0" width="22" height="12" fill="none" stroke="currentColor" stroke-width="2"/><rect id="sw-crt-knob" x="'+(on?'12':'2')+'" y="2" width="8" height="8" fill="currentColor"/></svg>&#9707; crt';}
 }
 function toggleCRT(){
   document.body.classList.toggle('crt');
@@ -8697,11 +8744,11 @@ function openVideosBrowser(slot,src,tok){
   modal._tvMount=document.body.classList.contains('tv')?document.querySelector('.app'):document.body;
 
   modal.innerHTML=`
-    <div id="vb-panel" style="width:min(560px,95vw);background:var(--paper);border:2px solid var(--ink);display:flex;flex-direction:column;max-height:92vh;zoom:1.5;">
+    <div id="vb-panel" role="dialog" aria-modal="true" aria-label="random archive clip" style="width:min(560px,95vw);background:var(--paper);border:2px solid var(--ink);display:flex;flex-direction:column;max-height:92vh;zoom:1.5;">
       <!-- title bar -->
       <div style="background:var(--paper);background-image:var(--stripes-h);background-repeat:repeat;border-bottom:2px solid var(--ink);height:26px;display:flex;align-items:center;justify-content:center;position:relative;flex-shrink:0;">
         <span style="font-family:'Silkscreen',monospace;font-size:10px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;background:var(--paper);padding:1px 10px;">RANDOM</span>
-        <button id="vb-close" style="position:absolute;right:5px;top:50%;transform:translateY(-50%);background:var(--paper);border:2px solid var(--ink);color:var(--ink);font-family:'Silkscreen',monospace;font-size:9px;font-weight:700;cursor:pointer;width:17px;height:17px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;">✕</button>
+        <button type="button" id="vb-close" aria-label="close" style="position:absolute;right:5px;top:50%;transform:translateY(-50%);background:var(--paper);border:2px solid var(--ink);color:var(--ink);font-family:'Silkscreen',monospace;font-size:9px;font-weight:700;cursor:pointer;width:17px;height:17px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;">✕</button>
       </div>
       <!-- intro + status row -->
       <div style="padding:8px 12px;border-bottom:2px solid var(--ink);flex-shrink:0;background:var(--paper);text-align:center;">
@@ -9360,12 +9407,13 @@ rebuildSlots=function(){if(_bankSwitching)return;_origRebuild();autoSave();};
 
 <!-- ARCHIVE PROMPT -->
 <div id="archive-prompt-overlay">
-  <div id="archive-prompt-box">
+  <div id="archive-prompt-box" role="dialog" aria-modal="true" aria-label="archive">
     <div class="ap-titlebar">
       <span>ARCHIVE</span>
-      <button id="archive-prompt-cancel" style="position:absolute;right:5px;top:50%;transform:translateY(-50%);background:var(--paper);border:2px solid var(--ink);color:var(--ink);font-family:'Silkscreen',monospace;font-size:9px;font-weight:700;cursor:pointer;width:17px;height:17px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;">✕</button>
+      <button type="button" id="archive-prompt-cancel" aria-label="close" style="position:absolute;right:5px;top:50%;transform:translateY(-50%);background:var(--paper);border:2px solid var(--ink);color:var(--ink);font-family:'Silkscreen',monospace;font-size:9px;font-weight:700;cursor:pointer;width:17px;height:17px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;">✕</button>
     </div>
     <div class="ap-body" style="text-align:center;">drop an archive.org url below and we'll do the rest.<br>any page from archive.org works.</div>
+    <label for="archive-prompt-input" class="sr-only">archive.org url</label>
     <input id="archive-prompt-input" type="text" placeholder="https://archive.org/details/..." spellcheck="false">
     <div class="ap-caveat" style="text-align:center;">heads up: this might take up to a minute depending on the file size. don't switch sources while it's loading.</div>
     <div class="ap-btns" style="justify-content:center;">
@@ -9376,12 +9424,12 @@ rebuildSlots=function(){if(_bankSwitching)return;_origRebuild();autoSave();};
 
 <!-- TUTORIAL -->
 <div id="tut-card" class="inverse">
-  <div class="tc-tabs" id="tc-tabs">
-    <div class="tc-tab" id="tc-tab-1" data-ch="1"><span>chapter 1: intro</span></div>
-    <div class="tc-tab" id="tc-tab-2" data-ch="2"><span>2</span></div>
-    <div class="tc-tab" id="tc-tab-3" data-ch="3"><span>3</span></div>
-    <div class="tc-tab" id="tc-tab-4" data-ch="4"><span>4</span></div>
-    <div class="tc-tab" id="tc-tab-5" data-ch="5"><span>5</span></div>
+  <div class="tc-tabs" id="tc-tabs" role="tablist" aria-label="tutorial chapters">
+    <button type="button" class="tc-tab" id="tc-tab-1" data-ch="1" role="tab" aria-selected="false"><span>chapter 1: intro</span></button>
+    <button type="button" class="tc-tab" id="tc-tab-2" data-ch="2" role="tab" aria-selected="false"><span>2</span></button>
+    <button type="button" class="tc-tab" id="tc-tab-3" data-ch="3" role="tab" aria-selected="false"><span>3</span></button>
+    <button type="button" class="tc-tab" id="tc-tab-4" data-ch="4" role="tab" aria-selected="false"><span>4</span></button>
+    <button type="button" class="tc-tab" id="tc-tab-5" data-ch="5" role="tab" aria-selected="false"><span>5</span></button>
   </div>
   <div class="tc-inner">
     <div class="tc-progress" id="tc-progress"></div>
@@ -9404,7 +9452,7 @@ rebuildSlots=function(){if(_bankSwitching)return;_origRebuild();autoSave();};
 <!-- SKIP INTERCEPT MODAL -->
 <div id="skip-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;z-index:9100;align-items:center;justify-content:center;">
   <div id="skip-modal-bg" style="position:absolute;top:0;left:0;width:100%;height:100%;background:var(--ink);opacity:0.7;" onclick="_skipModalDismiss()"></div>
-  <div id="skip-modal-box" class="inverse" style="position:relative;width:300px;background:var(--paper);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);zoom:1.5;font-family:'Silkscreen',monospace;">
+  <div id="skip-modal-box" class="inverse" role="dialog" aria-modal="true" aria-label="before you go" style="position:relative;width:300px;background:var(--paper);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);zoom:1.5;font-family:'Silkscreen',monospace;">
     <div style="background:var(--paper);background-image:var(--stripes-h);background-repeat:repeat;border-bottom:2px solid var(--ink);height:26px;display:flex;align-items:center;justify-content:center;">
       <span style="font-family:'Silkscreen',monospace;font-size:10px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;background:var(--paper);padding:1px 10px;color:var(--ink);">before you go</span>
     </div>
@@ -11282,10 +11330,13 @@ function _showTS(i){
       if(canClick) t.classList.add('unlocked');
       else t.classList.add('locked');
     }
+    t.setAttribute('aria-selected',String(tch===activeCh));
+    t.setAttribute('aria-disabled',String(t.classList.contains('locked')));
     // wire click once (use dataset flag to avoid duplication)
     if(!t.dataset.wired){
       t.dataset.wired='1';
       t.addEventListener('click',()=>{
+        if(t.classList.contains('locked')) return; // keyboard can reach a locked tab (pointer-events:none only stops the mouse)
         const dest=parseInt(t.dataset.ch);
         const curCh=TUT_STEPS[_ts]?._chapter||1;
         if(dest===curCh) return;
