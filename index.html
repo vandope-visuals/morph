@@ -5659,8 +5659,8 @@ function processRowShiftModule(mod,srcCanvas){
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
   const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
-  const tmp=new Uint8ClampedArray(d);
-  if(!mod._rowSeeds) mod._rowSeeds=Array.from({length:H},()=>Math.random());
+  const tmp=_modScratch(mod,d.length); tmp.set(d);
+  if(!mod._rowSeeds||mod._rowSeeds.length!==H){mod._rowSeeds=new Float32Array(H);for(let y=0;y<H;y++)mod._rowSeeds[y]=Math.random();}
   const time=performance.now()*0.001;
 
   if(fx===0){ // interlace — even/odd rows shift in opposite directions
@@ -5889,6 +5889,8 @@ function processPixelSortModule(mod,srcCanvas){
 }
 
 
+// per-pixel noise uses an inline xorshift32 seeded from Math.random once per frame (Math.random per channel
+// per pixel was most of the cost); sparse hits (salt & pepper, bit flip) use geometric skips
 function processSignalNoiseModule(mod,srcCanvas){
   if(GLProcessor.ready()){
     const GL_SN={0:'sn_luma',1:'sn_quantize',2:'sn_chroma',3:'sn_rgb',4:'sn_saltpepper',5:'sn_bitflip'};
@@ -5902,59 +5904,62 @@ function processSignalNoiseModule(mod,srcCanvas){
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
-  const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
-  const amount=p*t*80;
-  for(let i=0;i<d.length;i+=4){
-    if(fx===3||fx===7){ // rgb noise - independent channels
-      d[i]=Math.min(255,Math.max(0,d[i]+(Math.random()-0.5)*amount));
-      d[i+1]=Math.min(255,Math.max(0,d[i+1]+(Math.random()-0.5)*amount));
-      d[i+2]=Math.min(255,Math.max(0,d[i+2]+(Math.random()-0.5)*amount));
+  const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data,len=d.length;
+  const amount=p*t*80,R=2.3283064365386963e-10; // 1/2^32
+  let s=(Math.random()*4294967295)|1;
+  if(fx===3||fx===7||fx===0||fx===2){
+    const rgb=fx===3||fx===7,luma=fx===0||fx===7,a2=amount*0.5;
+    for(let i=0;i<len;i+=4){
+      if(rgb){ // rgb noise - independent channels
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i]=d[i]+((s>>>0)*R-0.5)*amount;
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i+1]=d[i+1]+((s>>>0)*R-0.5)*amount;
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i+2]=d[i+2]+((s>>>0)*R-0.5)*amount;
+      }
+      if(luma){ // luma noise
+        s^=s<<13;s^=s>>>17;s^=s<<5;const n=((s>>>0)*R-0.5)*a2;
+        d[i]=d[i]+n;d[i+1]=d[i+1]+n;d[i+2]=d[i+2]+n;
+      }
+      if(fx===2){ // chroma noise - only R and B channels
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i]=d[i]+((s>>>0)*R-0.5)*amount;
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i+2]=d[i+2]+((s>>>0)*R-0.5)*amount;
+      }
     }
-    if(fx===0||fx===7){ // luma noise
-      const n=(Math.random()-0.5)*amount*0.5;
-      d[i]=Math.min(255,Math.max(0,d[i]+n));
-      d[i+1]=Math.min(255,Math.max(0,d[i+1]+n));
-      d[i+2]=Math.min(255,Math.max(0,d[i+2]+n));
-    }
-    if(fx===2){ // chroma noise - only R and B channels
-      d[i]=Math.min(255,Math.max(0,d[i]+(Math.random()-0.5)*amount));
-      d[i+2]=Math.min(255,Math.max(0,d[i+2]+(Math.random()-0.5)*amount));
-    }
-    if(fx===1){ // quantize — posterize to step levels
-      const steps=Math.max(2,Math.floor((1-p)*32*t)+2);
-      const step=255/steps;
+  }
+  if(fx===1){ // quantize — posterize to step levels
+    const steps=Math.max(2,Math.floor((1-p)*32*t)+2);
+    const step=255/steps;
+    for(let i=0;i<len;i+=4){
       d[i]=Math.round(d[i]/step)*step;
       d[i+1]=Math.round(d[i+1]/step)*step;
       d[i+2]=Math.round(d[i+2]/step)*step;
     }
-    if(fx===4||fx===7){ // salt & pepper
-      if(Math.random()<p*t*0.04){d[i]=d[i+1]=d[i+2]=Math.random()<0.5?0:255;}
-    }
-    if(fx===6){ // hue drift — rotate hue by random per-pixel amount
-      const r=d[i]/255,g=d[i+1]/255,b=d[i+2]/255;
-      const max=Math.max(r,g,b),min=Math.min(r,g,b),delta=max-min;
-      if(delta>0.01){
-        let h=0;
-        if(max===r) h=(g-b)/delta%6;
-        else if(max===g) h=(b-r)/delta+2;
-        else h=(r-g)/delta+4;
-        h=(h*60+360+(Math.random()-0.5)*p*t*120)%360;
-        const s=delta/max, v=max;
-        const c=v*s,x2=c*(1-Math.abs((h/60)%2-1)),m=v-c;
+  }
+  if(fx===4||fx===7){ // salt & pepper
+    const pr=p*t*0.04;
+    if(pr>0){const lq=Math.log(1-pr),n=len>>2;for(let k=_geoSkip(lq)-1;k<n;k+=_geoSkip(lq)){const i=k*4;d[i]=d[i+1]=d[i+2]=Math.random()<0.5?0:255;}}
+  }
+  if(fx===6){ // hue drift — rotate hue by random per-pixel amount (worked in 0..255 units: c=max-min, m=min)
+    const hs=p*t*120;
+    for(let i=0;i<len;i+=4){
+      const r=d[i],g=d[i+1],b=d[i+2];
+      const max=r>g?(r>b?r:b):(g>b?g:b),min=r<g?(r<b?r:b):(g<b?g:b),c=max-min;
+      if(c>2.55){
+        // float % is a libm call in v8: the ranges are known, so wrap by subtraction instead
+        let h=max===r?(g-b)/c:max===g?(b-r)/c+2:(r-g)/c+4; // (g-b)/c is already in [-1,1]
+        s^=s<<13;s^=s>>>17;s^=s<<5;
+        h=h*60+360+((s>>>0)*R-0.5)*hs; while(h>=360)h-=360;
+        const hh=h/60,hi=hh|0,x2=c*(1-Math.abs(hh-(hi&~1)-1));
         let r2=0,g2=0,b2=0;
-        const hi=Math.floor(h/60);
         if(hi===0){r2=c;g2=x2;}else if(hi===1){r2=x2;g2=c;}
         else if(hi===2){g2=c;b2=x2;}else if(hi===3){g2=x2;b2=c;}
         else if(hi===4){r2=x2;b2=c;}else{r2=c;b2=x2;}
-        d[i]=(r2+m)*255|0;d[i+1]=(g2+m)*255|0;d[i+2]=(b2+m)*255|0;
+        d[i]=(r2+min)|0;d[i+1]=(g2+min)|0;d[i+2]=(b2+min)|0;
       }
     }
-    if(fx===5){ // bit flip
-      if(Math.random()<p*t*0.02){
-        const bit=1<<Math.floor(Math.random()*8);
-        d[i+Math.floor(Math.random()*3)]^=bit;
-      }
-    }
+  }
+  if(fx===5){ // bit flip
+    const pr=p*t*0.02;
+    if(pr>0){const lq=Math.log(1-pr),n=len>>2;for(let k=_geoSkip(lq)-1;k<n;k+=_geoSkip(lq)){const bit=1<<Math.floor(Math.random()*8);d[k*4+Math.floor(Math.random()*3)]^=bit;}}
   }
   ctx.putImageData(imgData,0,0);
   mod._lastResult=mod.offscreen;
