@@ -363,7 +363,8 @@ if (saveBaseline && only.includes('bench')) { fs.mkdirSync(BASELINE, { recursive
 // ── report ──
 const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : String(v));
 console.log('\n== smoke ==');
-for (const [k, v] of Object.entries(results.smoke)) if (k !== 'gl') console.log((v === 'ok' ? '  ok   ' : '  FAIL ') + k + (v === 'ok' || typeof v === 'number' ? '' : '\n        ' + JSON.stringify(v).slice(0, 400)));
+for (const [k, v] of Object.entries(results.smoke)) if (k !== 'gl' && k !== '_errorCount') console.log((v === 'ok' ? '  ok   ' : '  FAIL ') + k + (v === 'ok' || typeof v === 'number' ? '' : '\n        ' + JSON.stringify(v).slice(0, 400)));
+if ('_errorCount' in results.smoke) console.log('  console/page errors: ' + results.smoke._errorCount);
 if (results.smoke.gl) console.log('  gl:', JSON.stringify(results.smoke.gl));
 if (only.includes('bench')) {
   const base = baselinePath && fs.existsSync(baselinePath) ? JSON.parse(fs.readFileSync(baselinePath)).bench : null;
