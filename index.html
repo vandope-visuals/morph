@@ -2549,17 +2549,28 @@ outputCv.width=W;outputCv.height=H;
 const outputCtx=outputCv.getContext('2d');
 [cvA,cvB,cvMix].forEach(c=>{c.width=W;c.height=H;});
 
+// a tainted canvas can't be cleaned, so swap in a fresh one. it's never attached to the DOM
+// (it used to be appended to <body> on every call — every frame after a SecurityError)
 function resetMixCanvas(){
   const fresh=document.createElement('canvas');
-  fresh.width=W;fresh.height=H;fresh.style.display='none';
-  document.body.appendChild(fresh);
+  fresh.width=W;fresh.height=H;
+  if(cvMix&&cvMix.parentNode&&cvMix.id!=='cv-mix') cvMix.remove();
   cvMix=fresh;
   ctxMix=fresh.getContext('2d',{willReadFrequently:true});
   state.modules.forEach(mod=>{mod.offscreen=null;mod.offCtx=null;if(mod.dmosh)mod.dmosh={iFrame:null,iFrameCounter:0,dispBuf:null,flowBuf:null,flowRef:null,moshBuf:null};});
 }
 
+// preview canvases track their css width. sizes are cached and refreshed by one
+// ResizeObserver (reading offsetWidth for 7+N canvases per UI tick forced layout)
+const _cvW=new WeakMap();
+const _cvRO=typeof ResizeObserver==='function'?new ResizeObserver(es=>{
+  for(const e of es){const el=e.target;
+    if(!el.isConnected){_cvRO.unobserve(el);_cvW.delete(el);continue;}
+    _cvW.set(el,el.offsetWidth);}
+}):null;
 function syncCanvasSize(cv){
-  const w=cv.offsetWidth;
+  let w=_cvW.get(cv);
+  if(w===undefined){w=cv.offsetWidth;if(_cvRO&&cv.isConnected){_cvW.set(cv,w);_cvRO.observe(cv);}}
   if(!w) return;
   if(cv.width!==w){ cv.width=w; cv.height=Math.round(w*9/16); }
 }
@@ -3156,20 +3167,29 @@ GLProcessor.init();
 
 // ── PERFORMANCE GOVERNOR ──
 // Adaptive quality ladder that defends a 24fps floor. Evaluated once per
-// second from measured FPS. Levels trade quality for speed with hysteresis
-// so it never oscillates:
+// second from the measured frame COST (mean ms spent inside renderFrame over
+// the last second), not the raw rAF count — a browser that throttles rAF
+// (battery saver 30fps cap, 30Hz display, background/embedded panes) says
+// nothing about whether our work fits. Levels trade quality for speed with
+// hysteresis so it never oscillates:
 //   L0 — full quality
 //   L1 — heavy modules process every other frame (cached result reuse),
 //        UI thumbnails throttle to 8fps
 //   L2 — L1 + internal processing resolution drops to 0.75×
 //   L3 — L1 + internal processing resolution drops to 0.5×
-// Demote: fps < GOV_LOW steps down one level per second.
-// Promote: fps ≥ GOV_HIGH for GOV_RECOVER_SECS consecutive seconds steps up.
+// Demote: cost > GOV_COST_HI steps down one level per second.
+// Promote: cost < GOV_COST_LO for GOV_RECOVER_SECS consecutive seconds steps up.
+// (HI/LO ratio > the biggest per-level pixel ratio, 2.25, so a promotion can't
+// immediately re-trigger a demotion.) Ticks are skipped while the tab is
+// hidden or after a >2s gap (tab switch, sleep).
 let _currentFps=60;
 let _perfLevel=0;
-const GOV_LOW=28, GOV_HIGH=50, GOV_RECOVER_SECS=3, GOV_MAX_LEVEL=3;
+const GOV_LOW=28, GOV_HIGH=50;           // fps thresholds (legacy, informational)
+const GOV_COST_HI=25, GOV_COST_LO=10;    // ms of renderFrame work per frame
+const GOV_RECOVER_SECS=3, GOV_MAX_LEVEL=3;
 const GOV_SCALE=[1, 1, 0.75, 0.5];
 let _govGoodSecs=0;
+let _costSum=0,_costN=0,_frameCost=0;    // _frameCost = mean ms/frame over the last second
 
 function _governorApplyRes(){
   const s=GOV_SCALE[_perfLevel];
@@ -3178,12 +3198,13 @@ function _governorApplyRes(){
   _applyResolution(w,h);
 }
 
-function _governorTick(fps){
+function _governorTick(fps,cost){
+  if(cost==null) cost=_frameCost;
   const prev=_perfLevel;
-  if(fps<GOV_LOW && _perfLevel<GOV_MAX_LEVEL){
+  if(cost>GOV_COST_HI && _perfLevel<GOV_MAX_LEVEL){
     _perfLevel++;
     _govGoodSecs=0;
-  } else if(fps>=GOV_HIGH && _perfLevel>0){
+  } else if(cost<GOV_COST_LO && _perfLevel>0){
     _govGoodSecs++;
     if(_govGoodSecs>=GOV_RECOVER_SECS){ _perfLevel--; _govGoodSecs=0; }
   } else {
@@ -3196,16 +3217,49 @@ function _governorTick(fps){
   }
 }
 
+// output window canvas, looked up once per window (was getElementById every frame)
+let _ocWin=null,_ocEl=null,_ocCtx=null,_liveIndOn=false;
+function _drawOutputWin(){
+  const ow=state.outputWin;
+  if(!ow||!state._outputWinReady) return;
+  if(ow.closed){_ocWin=_ocEl=_ocCtx=null;return;} // the close-watcher resets streaming state
+  try{
+    if(_ocWin!==ow||!_ocEl||!_ocEl.isConnected){
+      _ocWin=ow;_ocEl=ow.document.getElementById('c');_ocCtx=_ocEl?_ocEl.getContext('2d'):null;
+    }
+    if(_ocCtx){
+      if(_ocEl.width!==W||_ocEl.height!==H){_ocEl.width=W;_ocEl.height=H;}
+      _ocCtx.drawImage(outputCv,0,0);
+    }
+  }catch(e){_ocWin=_ocEl=_ocCtx=null;}
+}
+// full-rate outputs fed from outputCv: recording canvas, pip, audience window (every frame —
+// it's a gpu drawImage; the old >=33ms gate capped the audience at ~30fps with uneven pacing)
+function _feedOutputs(){
+  if(typeof recorder!=='undefined'&&recorder&&recorder.state==='recording') _drawRecFrame();
+  if(!state.outputStreaming) updatePip(outputCv);
+  _drawOutputWin();
+}
+function _drawPreview(cv,src){
+  if(!cv) return;
+  syncCanvasSize(cv);
+  const c=cv.getContext('2d');
+  c.fillStyle='#000';c.fillRect(0,0,cv.width,cv.height);
+  if(src) c.drawImage(src,0,0,cv.width,cv.height);
+}
+
 function renderFrame(){
   requestAnimationFrame(renderFrame);
+  const _now=performance.now();
   state.frames++;
 
   // throttle UI thumbnail updates — 8fps when streaming or in eco mode, 15fps otherwise
-  const _now=performance.now();
   if(!state._lastUiDraw) state._lastUiDraw=0;
   const _uiInterval=(state.outputStreaming||_perfLevel>=1) ? 120 : 66;
   const _drawUi=(_now-state._lastUiDraw)>=_uiInterval;
   if(_drawUi) state._lastUiDraw=_now;
+  state.drawUi=_drawUi; // true on frames where UI thumbnails redraw (others can throttle to it)
+  if(GLProcessor.ready()) GLProcessor.frame();
 
   const cvA2=getSourceCanvas('A');
   const cvB2=getSourceCanvas('B');
@@ -3245,9 +3299,13 @@ function renderFrame(){
   });
 
   if(!cvA2&&!cvB2){
-    // nothing to render — still tick modulators
+    // nothing to render — still tick modulators, and keep the outputs live (black) so the
+    // audience window / recording don't freeze on the last frame
     tickLFOs();tickEnvelopes();tickAudio();tickSequencers();tickPerlin();tickXYPads();tickRandomWalks();
-    _tickFpsCounter();
+    outputCtx.fillStyle='#000';outputCtx.fillRect(0,0,W,H);
+    if(_drawUi){_drawPreview(masterCv,null);_drawPreview(document.getElementById('bot-master-cv'),null);}
+    _feedOutputs();
+    _frameDone(_now);
     return;
   }
 
@@ -3310,52 +3368,46 @@ function renderFrame(){
   tickXYPads();
   tickRandomWalks();
 
-  if(_drawUi){syncCanvasSize(masterCv);masterCtx.fillStyle='#000';masterCtx.fillRect(0,0,masterCv.width,masterCv.height);masterCtx.drawImage(cur,0,0,masterCv.width,masterCv.height);}
+  if(_drawUi){_drawPreview(masterCv,cur);_drawPreview(document.getElementById('bot-master-cv'),cur);}
   // draw to full-res output canvas (used for stream, photo, recording)
   outputCtx.fillStyle='#000';outputCtx.fillRect(0,0,W,H);
   outputCtx.drawImage(cur,0,0,W,H);
-  // feed the fixed-720p recording canvas while a recording is running
-  if(typeof recorder!=='undefined'&&recorder&&recorder.state==='recording') _drawRecFrame();
-  if(!state.outputStreaming) updatePip(outputCv);
-  // draw to bottom panel master preview
-  if(_drawUi){const botMaster=document.getElementById('bot-master-cv');if(botMaster){syncCanvasSize(botMaster);botMaster.getContext('2d').fillStyle='#000';botMaster.getContext('2d').fillRect(0,0,botMaster.width,botMaster.height);botMaster.getContext('2d').drawImage(cur,0,0,botMaster.width,botMaster.height);}}
-  document.getElementById('live-ind').style.display='';
+  _feedOutputs();
+  if(!_liveIndOn){const li=document.getElementById('live-ind');if(li){li.style.display='';_liveIndOn=true;}}
 
-  if(state.outputWin && !state.outputWin.closed && state._outputWinReady){
-    if(!state._lastBcFrame) state._lastBcFrame=0;
-    const _bcNow=performance.now();
-    if(_bcNow-state._lastBcFrame>=33){
-      state._lastBcFrame=_bcNow;
-      try{
-        const oc=state.outputWin.document.getElementById('c');
-        if(oc){
-          if(oc.width!==W||oc.height!==H){oc.width=W;oc.height=H;}
-          oc.getContext('2d').drawImage(outputCv,0,0);
-        }
-      }catch(e){}
-    }
-  }
+  _frameDone(_now);
+}
 
+// per-frame cost sample (capped so one hitch — a file load, a gc — can't demote on its own)
+function _frameDone(t0){
+  _costSum+=Math.min(100,performance.now()-t0);_costN++;
   _tickFpsCounter();
 }
 
 // shared once-per-second FPS counter + governor hook (used by both render paths)
 function _tickFpsCounter(){
-  const now=performance.now();
-  if(now-state.lastFps<=1000) return;
-  _currentFps=state.frames;
-  const fpsEl=document.getElementById('fps-num');
+  const now=performance.now(),dt=now-state.lastFps;
+  if(dt<=1000) return;
+  const fps=Math.round(state.frames*1000/dt); // normalized to elapsed time (ticks land at 1000-1016ms+)
+  _currentFps=fps;
+  _frameCost=_costN?_costSum/_costN:0;
+  _costSum=0;_costN=0;
   const fpsBig=document.getElementById('fps-big');
-  if(fpsEl) fpsEl.textContent=state.frames;
   if(fpsBig){
     // the performance governor works silently — no eco badge in the counter
-    if(state.frames<=15){
-      fpsBig.innerHTML='<span style="animation:blink 0.7s steps(2,end) infinite;">⚠</span> <span id="fps-num">'+state.frames+'</span> FPS <span style="animation:blink 0.7s steps(2,end) infinite;">⚠</span>';
+    if(fps<=15){
+      fpsBig.innerHTML='<span style="animation:blink 0.7s steps(2,end) infinite;">⚠</span> <span id="fps-num">'+fps+'</span> FPS <span style="animation:blink 0.7s steps(2,end) infinite;">⚠</span>';
     } else {
-      fpsBig.innerHTML='<span id="fps-num">'+state.frames+'</span> FPS';
+      fpsBig.innerHTML='<span id="fps-num">'+fps+'</span> FPS';
     }
+  } else {
+    const fpsEl=document.getElementById('fps-num');
+    if(fpsEl) fpsEl.textContent=fps;
   }
-  _governorTick(state.frames);
+  if(pipActive){const lbl=document.getElementById('pip-fps-label');if(lbl) lbl.textContent=fps+' fps';}
+  // hidden tab / long gap (tab switch, sleep): the sample isn't representative — skip
+  if(!document.hidden&&dt<=2000) _governorTick(fps,_frameCost);
+  else _govGoodSecs=0;
   state.frames=0; state.lastFps=now;
 }
 requestAnimationFrame(renderFrame);
@@ -7441,15 +7493,14 @@ document.addEventListener('click',e=>{
   document.addEventListener('mouseup',()=>dragging=false);
 })();
 
+// fps label is written once a second by _tickFpsCounter; element + context cached
+let _pipEl=null,_pipCtx=null;
 function updatePip(masterCanvas){
   if(!pipActive) return;
-  const cv=pipCv();
-  if(!cv) return;
-  if(cv.width!==pipW){cv.width=pipW;cv.height=pipH;}
-  const ctx=cv.getContext('2d');
-  ctx.drawImage(masterCanvas,0,0,pipW,pipH);
-  const lbl=document.getElementById('pip-fps-label');
-  if(lbl) lbl.textContent=(document.getElementById('fps-num')?.textContent||'--')+' fps';
+  if(!_pipEl||!_pipEl.isConnected){_pipEl=pipCv();_pipCtx=_pipEl?_pipEl.getContext('2d'):null;}
+  if(!_pipCtx) return;
+  if(_pipEl.width!==pipW||_pipEl.height!==pipH){_pipEl.width=pipW;_pipEl.height=pipH;}
+  _pipCtx.drawImage(masterCanvas,0,0,pipW,pipH);
 }
 
 function toggleFS(){
