@@ -1059,7 +1059,7 @@ input[type=file]{display:none;}
 }
 @keyframes boot-in{from{opacity:0;}to{opacity:1;}}
 .boot-modal{
-  width:560px;max-width:calc(100vw - 40px);
+  width:720px;max-width:calc(100vw - 40px);
   background:var(--paper);border:2px solid var(--ink);
   box-shadow:10px 10px 0 var(--ink);
   font-family:var(--body);position:relative;overflow:hidden;
@@ -1133,7 +1133,7 @@ input[type=file]{display:none;}
   margin-bottom:22px;margin-top:8px;
 }
 .boot-body{
-  font-family:var(--body);font-size:11px;line-height:1.5;
+  font-family:var(--body);font-size:15px;line-height:1.5;
   color:var(--ink);
   margin-bottom:22px;
   text-transform:lowercase;
@@ -1151,6 +1151,9 @@ input[type=file]{display:none;}
     2px 0 var(--paper),-2px 0 var(--paper);
 }
 .boot-body p:last-child{margin-bottom:0;}
+/* fixed line breaks; lines only rewrap when the screen is too narrow */
+.boot-line{display:block;}
+@media (min-width:700px){.boot-line{white-space:nowrap;}}
 .boot-body strong{
   color:var(--paper);background:var(--ink);font-weight:700;
   padding:0 3px;text-shadow:none;
@@ -1946,7 +1949,7 @@ body.crt .app{
       <div class="boot-title" id="boot-title">m-or.ph</div>
       <div class="boot-sub">modular object rendering &amp; processing hub</div>
       <div class="boot-body">
-        <p>m-or.ph is a web-based AV tool for live on-the-go performance. Made for VJs, experimental artists, in-house party visual guys, or that guy who borrowed their friend's laptop 10 minutes before the show. One file. One browser. Any screen. Any machine.</p>
+        <p><span class="boot-line">m-or.ph is a web-based AV tool for live on-the-go performance.</span><span class="boot-line">Made for VJs, experimental artists, in-house party visual guys,</span><span class="boot-line">or that guy who borrowed their friend's laptop 10 minutes before</span><span class="boot-line">the show. One file. One browser. Any screen. Any machine.</span></p>
       </div>
       <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding-top:24px;gap:0;">
         <button class="boot-btn boot-btn-main" type="button" onclick="launchSequence();return false;">INITIALIZE</button>
@@ -7649,12 +7652,13 @@ function launchSequence(){
   },160);
 
   // very light text scramble — only a few chars at a time
-  const body=document.querySelector('.boot-body p');
-  const origText=body?body.textContent:'';
+  // scramble each line on its own: textContent on the <p> would drop the breaks
+  const bootLines=[...document.querySelectorAll('.boot-body .boot-line')];
+  const origLines=bootLines.map(l=>l.textContent);
   let scrambleIv=null;
-  if(body){
+  if(bootLines.length){
     scrambleIv=setInterval(()=>{
-      body.textContent=origText.split('').map(c=>c===' '?' ':Math.random()<0.06?rnd():c).join('');
+      bootLines.forEach((l,i)=>{l.textContent=origLines[i].split('').map(c=>c===' '?' ':Math.random()<0.06?rnd():c).join('');});
     },120);
   }
 
@@ -7674,7 +7678,7 @@ function launchSequence(){
     clearInterval(bandIv);
     modal.classList.remove('shaking');
     modal.style.transform='';
-    if(body) body.textContent=origText;
+    bootLines.forEach((l,i)=>{l.textContent=origLines[i];});
 
     // hard cut overlay to black
     overlay.style.background='var(--ink)';
