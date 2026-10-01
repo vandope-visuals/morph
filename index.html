@@ -2012,8 +2012,6 @@ function updatePreview(slot){
   const labelEl=document.getElementById('src-'+s+'-label');
   const btn=document.getElementById('src-replace-'+s);
   if(src.active){
-    // confirm tutorial replace flag when source actually loads (not just at startPickMode)
-    if(state&&state._tutPendingReplaceSlot===slot){state._tutReplace=true;state._tutPendingReplaceSlot=null;}
     if(slotEl){slotEl.classList.add('loaded');slotEl.style.display='flex';}
     if(labelEl) labelEl.textContent=src.label;
     if(btn&&pickMode!==slot) btn.textContent='replace';
@@ -2244,6 +2242,8 @@ const _loadTok={A:0,B:0};
 // before the file dialog / permission prompt, so cancel or deny left the
 // slot black
 function _commitSource(slot){
+  // tutorial: a replace counts once the new source actually loads
+  if(state._tutPendingReplaceSlot===slot){state._tutReplace=true;state._tutPendingReplaceSlot=null;}
   cleanupSource(slot);
   // reset all module offscreens — clears any canvas taint from previous source
   state.modules.forEach(mod=>{
@@ -8981,7 +8981,7 @@ const TUT_STEPS=[
 
   // ── CHAPTER 1: INTRO ──────────────────────────────────────
   {
-    _chapter:1, _chapterLabel:'intro',
+    id:'you-found-m', _chapter:1, _chapterLabel:'intro',
     _intro:true,
     text:"you found m-or.ph.",
     action:"m-or.ph is a live video mixer that runs entirely in your browser. no install. no account. just open it and start performing.",
@@ -9036,7 +9036,7 @@ const TUT_STEPS=[
   },
   // ch1 slide 2: creator
   {
-    _chapter:1, _chapterLabel:'intro', _concept:true,
+    id:'hello-im-vandope', _chapter:1, _chapterLabel:'intro', _concept:true,
     text:"hello, i'm vandope.",
     action:"so why did i build this? i just want to make trippy visuals. that's it. but finding software that makes me do that is harder than it should be. the free ones are bad, the good ones are expensive, and downloading a crack will get you malware. so m-or.ph was built.",
     illus:`<svg width="220" height="100" viewBox="0 0 220 100" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9113,7 +9113,7 @@ const TUT_STEPS=[
   },
   // ch1 slide 3: bridge
   {
-    _chapter:1, _chapterLabel:'intro', _concept:true,
+    id:'what-exactly-does', _chapter:1, _chapterLabel:'intro', _concept:true,
     text:"what exactly does m-or.ph do?",
     action:"m-or.ph takes in 2 video inputs, runs them through funky effects, and sends out one clean trippy output. that's pretty much it. everything else is just how deep you want to go.",
     illus:`<svg width="290" height="100" viewBox="0 0 290 100" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9204,7 +9204,7 @@ const TUT_STEPS=[
   },
   // ch1 slide 3: the three parts
   {
-    _chapter:1, _chapterLabel:'intro', _concept:true,
+    id:'three-things-to', _chapter:1, _chapterLabel:'intro', _concept:true,
     text:"three things to remember:\ninputs, effects, output.",
     action:"think of it like a DJ mixer but for video. inputs are your tracks, you load two. effects are your filters and knobs, you stack them. output is where it all goes: a projector, a TV, a second screen.\nthey work top to bottom. what goes in gets processed. what gets processed goes out.",
     illus:`<svg width="220" height="88" viewBox="0 0 220 88" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9269,7 +9269,7 @@ const TUT_STEPS=[
   },
   // ch1 end
   {
-    _chapter:1, _chapterLabel:'intro', _chapterEnd:true,
+    id:'thats-the-big', _chapter:1, _chapterLabel:'intro', _chapterEnd:true,
     text:"that's the big picture.",
     action:"move on to the next chapter to know more about inputs. or you can explore first on your own.",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9318,7 +9318,7 @@ const TUT_STEPS=[
   // ── CHAPTER 2: INPUTS ──────────────────────────────────────
   // ch2 slide 1: what sources are
   {
-    _chapter:2, _chapterLabel:'inputs', _concept:true,
+    id:'first-give-it', _chapter:2, _chapterLabel:'inputs', _concept:true,
     text:"first, give it something to look at.",
     action:"you have two input slots, A and B. each one can take a source: a video, photo, text, your webcam, a generated pattern, footage from the internet archive, or whatever's on your screen right now.",
     illus:`<svg width="280" height="120" viewBox="0 0 280 120" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9380,7 +9380,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 2: load A
   {
-    _chapter:2, _chapterLabel:'inputs',
+    id:'input-a-is', _chapter:2, _chapterLabel:'inputs',
     text:"input A is empty.",
     action:"the input panel is on the left. pick any source to fill it. moving pattern or mathematical are instant if you want to start quick.\n\nadd a source to input A.",
     confirm:"good. that's A.",
@@ -9434,7 +9434,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 3: load B
   {
-    _chapter:2, _chapterLabel:'inputs',
+    id:'now-fill-input', _chapter:2, _chapterLabel:'inputs',
     text:"now fill input B.",
     action:"same deal. pick anything. it doesn't have to match.\n\nadd a source to input B.",
     confirm:"both slots filled.",
@@ -9512,7 +9512,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 3b: source controls concept
   {
-    _chapter:2, _chapterLabel:'inputs', _concept:true,
+    id:'every-source-comes', _chapter:2, _chapterLabel:'inputs', _concept:true,
     text:"every source comes with the same base controls.",
     action:"size, rotate, and fade are always there. some sources add more on top. video adds speed and loop. text adds font, color, and content. webcam lets you pick your device. solid color gives you a color picker. the rest just use the base.",
     illus:`<svg width="200" height="188" viewBox="0 0 200 188" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9584,7 +9584,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 4: replace
   {
-    _chapter:2, _chapterLabel:'inputs',
+    id:'sources-are-swappable', _chapter:2, _chapterLabel:'inputs',
     text:"sources are swappable mid-set.",
     action:"the REPLACE button on each input lets you switch sources without stopping anything. no interruption, no drama.\n\nreplace the source in input B with something different.",
     confirm:"you already know how to switch sources mid-performance. you didn't even notice it was a skill.",
@@ -9603,7 +9603,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 5: swap
   {
-    _chapter:2, _chapterLabel:'inputs',
+    id:'loaded-them-in', _chapter:2, _chapterLabel:'inputs',
     text:"loaded them in the wrong order?",
     action:"after sources have been selected, the top left panel shows the preview of inputs A and B. the swap button flips the 2 sources instantly\n\nswap inputs A and B.",
     confirm:"noted.",
@@ -9670,7 +9670,7 @@ const TUT_STEPS=[
   },
   // ch2 end
   {
-    _chapter:2, _chapterLabel:'inputs', _chapterEnd:true,
+    id:'you-now-control', _chapter:2, _chapterLabel:'inputs', _chapterEnd:true,
     text:"you now control what goes in.",
     action:"move on to the next chapter to know more about effects. or you can explore first on your own.",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9716,7 +9716,7 @@ const TUT_STEPS=[
   // ── CHAPTER 3: EFFECTS ─────────────────────────────────────
   // ch3 slide 1: what modules are
   {
-    _chapter:3, _chapterLabel:'effects', _concept:true,
+    id:'the-right-panel', _chapter:3, _chapterLabel:'effects', _concept:true,
     text:"the right panel is your effects rack.",
     action:"effects come in three flavors: processors, glitch, and modulators. let's go through each effect type one at a time",
     illus:`<svg width="264" height="74" viewBox="0 0 264 74" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9757,7 +9757,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 2: add processor
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'lets-start-with', _chapter:3, _chapterLabel:'effects',
     text:"let's start with processors and glitch.",
     action:"these effects can clean, transform, and destroy the source material. when stacked together, chaos ensues.\n\npick any effect under processors or glitch.",
     confirm:"first effect in the chain.",
@@ -9864,7 +9864,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 3: presets and knobs
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'every-effect-has', _chapter:3, _chapterLabel:'effects',
     text:"every effect has presets and knobs.",
     action:"presets change the mode. knobs control how much. they're yours to mess with.\n\nclick through at least three presets, then drag a knob.",
     confirm:"you have opinions about it already. good.",
@@ -9906,7 +9906,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 4: bypass
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'the-eye-icon', _chapter:3, _chapterLabel:'effects',
     text:"the eye icon is your on/off switch.",
     action:"this is bypass. toggle an effect off without removing it. useful when something looks wrong mid-set and you need to isolate it fast.\n\nclick the eye icon on your effect. watch the preview change.",
     confirm:"that's your \"i'll use you later button\", live.",
@@ -9946,7 +9946,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 5: modulators
   {
-    _chapter:3, _chapterLabel:'effects', _concept:true,
+    id:'modulators-are-different', _chapter:3, _chapterLabel:'effects', _concept:true,
     text:"modulators are different. they don't do anything on their own.",
     action:"they attach to other effects or to the crossfader and drive them automatically. add one, then click SEND TO and assign it to a knob on any processor or glitch effect. pick a wave shape. watch that knob move by itself.\nthat's automation. that's how you make something that performs without you touching it.",
     illus:`<svg width="220" height="56" viewBox="0 0 220 56" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9986,7 +9986,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 6: assign modulator
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'modulators-drive-other', _chapter:3, _chapterLabel:'effects',
     text:"modulators drive other effects automatically.",
     action:"add an oscillator, then use SEND TO to assign it to any knob on another effect. pick a wave. watch the knob move on its own.\n\nadd an oscillator and assign it to a knob.",
     confirm:"hands-free. now the machine is performing.",
@@ -10029,7 +10029,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 7: build to 5
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'the-chain-supports', _chapter:3, _chapterLabel:'effects',
     text:"the chain supports up to 5 effects.",
     action:"some are marked HEAVY. they cost more to run. the FPS counter is in the bottom bar. if it drops below 15, remove a heavy effect and watch it recover.\n\nstack effects until you hit 5.",
     confirm:"picking which 5 effects is now a mini game.",
@@ -10058,7 +10058,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 8: reorder
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'order-changes-everything', _chapter:3, _chapterLabel:'effects',
     text:"order changes everything.",
     action:"color before glitch looks different than glitch before color. same two effects, completely different result.\n\ndrag the ⠿ handle to reorder your effects.",
     confirm:"the chain is yours.",
@@ -10082,11 +10082,12 @@ const TUT_STEPS=[
   },
   // ch3 slide 9: mixer + crossfader
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'the-crossfader-is', _chapter:3, _chapterLabel:'effects',
     text:"the crossfader is your blend control.",
     action:"it sits at the bottom and blends A and B before effects touch anything. the mixer preview shows you the raw mix. collapse the mixer panel if it's in the way.\n\nput the fader somewhere between 20 and 80. not 0, not 50, not 100.",
     confirm:"bold choice.",
-    complete:()=>state._tutXfade,
+    // any fader (bottom bar or mixer node) — just has to land in 20–80, not 50
+    complete:()=>{const x=+state.xfade;return x>=20&&x<=80&&x!==50;},
     illus:`<svg width="220" height="44" viewBox="0 0 220 44" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
       <defs>
         <style>
@@ -10120,7 +10121,7 @@ const TUT_STEPS=[
   },
   // ch3 end
   {
-    _chapter:3, _chapterLabel:'effects', _chapterEnd:true,
+    id:'your-chain-is', _chapter:3, _chapterLabel:'effects', _chapterEnd:true,
     text:"your chain is doing something now.",
     action:"ready to talk about output?",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -10170,7 +10171,7 @@ const TUT_STEPS=[
   // ── CHAPTER 4: OUTPUT ──────────────────────────────────────
   // ch4 slide 1: three previews + popup sizing
   {
-    _chapter:4, _chapterLabel:'output', _concept:true,
+    id:'a-quick-orientation', _chapter:4, _chapterLabel:'output', _concept:true,
     text:"a quick orientation before we share anything.",
     action:"you have three views of your output: the small preview in the center, the master preview panel, and the output popup window. they all show the same thing at different sizes. those are all for your eyes, not your audience's.\nopen the popup now and try the different size options. you can place it anywhere on your screen, useful when the center output gets pushed down by effects, or when the preview feels too small to work with.",
     illus:`<svg width="220" height="62" viewBox="0 0 220 62" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -10209,7 +10210,7 @@ const TUT_STEPS=[
   },
   // ch4 slide 2: output window
   {
-    _chapter:4, _chapterLabel:'output',
+    id:'your-audience-sees', _chapter:4, _chapterLabel:'output',
     text:"your audience sees a separate window.",
     action:"click OUTPUT WINDOW in the top bar. it'll open as a new window or tab. if it's a tab, drag it out. then drag it to your second screen and press F to fullscreen. running live video through a browser to a projector with no app installed. yeah.\n\nopen the output window.",
     confirm:"output is live.",
@@ -10313,7 +10314,7 @@ const TUT_STEPS=[
   },
   // ch4 slide 3: capture
   {
-    _chapter:4, _chapterLabel:'output',
+    id:'capture-saves-your', _chapter:4, _chapterLabel:'output',
     text:"CAPTURE saves your work.",
     action:"PHOTO grabs a PNG of the current frame. VIDEO records up to 60 seconds as a .webm. after you capture, check your downloads folder right away to confirm it's there.\n\ntake a photo or start a recording.",
     confirm:"check your downloads. you'll be glad you did.",
@@ -10347,7 +10348,7 @@ const TUT_STEPS=[
   },
   // ch4 end
   {
-    _chapter:4, _chapterLabel:'output', _chapterEnd:true,
+    id:'you-can-now', _chapter:4, _chapterLabel:'output', _chapterEnd:true,
     text:"you can now share your work with the outside world.",
     action:"one last chapter.",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -10407,7 +10408,7 @@ const TUT_STEPS=[
   // ── CHAPTER 5: OUTRO ───────────────────────────────────────
   // ch5 slide 1: theme + CRT
   {
-    _chapter:5, _chapterLabel:'extras',
+    id:'two-switches-in', _chapter:5, _chapterLabel:'extras',
     text:"two switches in the top left bar.",
     action:"theme toggles light and dark mode. CRT adds a scanline overlay that makes everything look like it's on a 1987 television. it's a feature.\n\ntry both. pick your vibe.",
     confirm:"established.",
@@ -10440,7 +10441,7 @@ const TUT_STEPS=[
   },
   // ch5 slide 2: tooltips
   {
-    _chapter:5, _chapterLabel:'extras', _concept:true,
+    id:'hover-over-anything', _chapter:5, _chapterLabel:'extras', _concept:true,
     text:"hover over anything you don't understand.",
     action:"the GETTING STARTED panel in the bottom left updates in real time based on whatever you're hovering. not generic help, specific tips for that exact thing. it knows.\nmost people skip this entirely. those people ask questions that are already answered. don't be those people.",
     illus:`<svg width="220" height="60" viewBox="0 0 220 60" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -10496,7 +10497,7 @@ const TUT_STEPS=[
   },
   // ch5 end / final
   {
-    _chapter:5, _chapterLabel:'extras', _final:true,
+    id:'thats-everything', _chapter:5, _chapterLabel:'extras', _final:true,
     text:"that's everything.",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
       <defs>
@@ -10573,19 +10574,32 @@ const _CHAPTERS=[
   {n:5,label:'extras'},
 ];
 
+// progress is stored as the step's id so inserting/removing steps doesn't
+// shift users onto the wrong slide; old numeric index values still load
 function _saveProgress(){
-  try{localStorage.setItem('morph_tut_step',String(_ts));}catch(e){}
+  const s=TUT_STEPS[_ts];
+  try{localStorage.setItem('morph_tut_step',s&&s.id?s.id:String(_ts));}catch(e){}
 }
 
 function _loadProgress(){
-  try{const v=localStorage.getItem('morph_tut_step');return v!==null?Math.max(0,parseInt(v,10)||0):0;}catch(e){return 0;}
+  try{
+    const v=localStorage.getItem('morph_tut_step');
+    if(v===null) return 0;
+    if(/^\d+$/.test(v)) return Math.max(0,parseInt(v,10)||0);
+    const i=TUT_STEPS.findIndex(s=>s.id===v);
+    return i>=0?i:0;
+  }catch(e){return 0;}
 }
 
 let _tutReviewMode=false;
+let _tutFpsIv=null,_tutCtaT=null;
 
 function startTutorial(){
   // tutorial targets desktop panels that are hidden in TV mode — don't start
-  if(document.body.classList.contains('tv')) return;
+  if(document.body.classList.contains('tv')){setStatus('tutorial needs the desktop layout — switch back to hd first');return;}
+  // already running: just bring the card back (a second start orphaned the
+  // 400ms check interval and stacked listeners)
+  if(_ta){const tc=document.getElementById('tut-card');if(tc)tc.style.display='block';return;}
   // if already completed, enter review mode — all steps are freely skippable
   try{_tutReviewMode=!!localStorage.getItem('morph_tut_done');}catch(e){_tutReviewMode=false;}
   // resume where left off if in progress, otherwise start fresh
@@ -10593,7 +10607,7 @@ function startTutorial(){
   _ts=(saved>0&&saved<TUT_STEPS.length)?saved:0;
   _ta=true;_tsReady=false;
   if(_ts===0){
-    state._tutXfade=false;state._tutKnob=false;state._tutBypass=false;
+    state._tutKnob=false;state._tutBypass=false;
     state._tutCapture=false;state._tutPresets=0;state._tutOutput=false;
     state._tutSwap=false;state._tutReplace=false;state._tutReorder=false;
     state._tutTheme=false;state._tutCRT=false;state._tutFpsWarning=false;
@@ -10614,12 +10628,15 @@ function startTutorial(){
       tutCard.style.top=(r.top/totalZoom)+'px';
     }
   });});
+  clearInterval(_tp);
   _tp=setInterval(_checkTS,400);
-  document.addEventListener('keydown',_tutEsc);
-  if(!window._tutXfadePatched){
-    window._tutXfadePatched=true;
-    document.getElementById('mxf').addEventListener('input',()=>{state._tutXfade=true;});
-  }
+  // low-fps watch only while the tutorial runs (it used to poll from page load)
+  clearInterval(_tutFpsIv);
+  _tutFpsIv=setInterval(()=>{if(typeof _currentFps!=='undefined'&&_currentFps<15&&_currentFps>0)state._tutFpsWarning=true;},1000);
+  // capture phase: runs before the pick-mode / panel Escape handlers, so it
+  // can still see that Escape belongs to them
+  window.removeEventListener('keydown',_tutEsc,true);
+  window.addEventListener('keydown',_tutEsc,true);
   const _origOO=window.openOutput;
   if(!window._tutOOPatched){
     window._tutOOPatched=true;
@@ -10628,11 +10645,19 @@ function startTutorial(){
   _makeDraggable(document.getElementById('tut-card'));
 }
 
-function endTutorial(completed){
+// shared teardown for end + pause
+function _tutStop(){
   _ta=false;
   document.getElementById('tut-card').style.display='none';
-  clearInterval(_tp);
-  document.removeEventListener('keydown',_tutEsc);
+  const sm=document.getElementById('skip-modal');if(sm)sm.style.display='none';
+  clearInterval(_tp);_tp=null;
+  clearInterval(_tutFpsIv);_tutFpsIv=null;
+  clearTimeout(_tutCtaT);_tutCtaT=null;
+  window.removeEventListener('keydown',_tutEsc,true);
+}
+
+function endTutorial(completed){
+  _tutStop();
   if(completed){
     try{localStorage.setItem('morph_tut_done','1');localStorage.removeItem('morph_tut_step');localStorage.setItem('morph_tut_highest_ch','5');localStorage.removeItem('morph_skip_shown');}catch(e){}
   } else {
@@ -10668,14 +10693,29 @@ function _skipModalDismiss(){
 
 function _exploreTS(){
   // pause: hide card, save progress
-  _ta=false;
-  document.getElementById('tut-card').style.display='none';
-  clearInterval(_tp);
+  _tutStop();
   _saveProgress();
   setStatus('tutorial paused. click "? tutorial" to pick up where you left off.');
 }
 
-function _tutEsc(e){if(e.key==='Escape')endTutorial(false);}
+// Escape pauses (keeps progress) instead of ending + wiping it, and is left
+// alone when it belongs to something else: pick mode (which the tutorial
+// itself asks for), the capture panel/countdown, archive prompt, videos
+// browser, or the skip modal (Escape just closes that)
+function _tutEsc(e){
+  if(e.key!=='Escape'||!_ta) return;
+  const sm=document.getElementById('skip-modal');
+  if(sm&&sm.style.display&&sm.style.display!=='none'){sm.style.display='none';return;}
+  if(pickMode) return;
+  if(typeof _capturePanelOpen!=='undefined'&&(_capturePanelOpen||countdownActive)) return;
+  if(document.getElementById('archive-prompt-overlay')?.classList.contains('open')) return;
+  if(document.getElementById('vb-modal')) return;
+  const bo=document.getElementById('boot-overlay');
+  if(bo&&!bo.classList.contains('dismissed')) return;
+  const t=e.target;
+  if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable)) return;
+  _exploreTS();
+}
 
 function _nextTS(){
   _tsReady=false;
@@ -10735,6 +10775,8 @@ function _checkTS(){
 
 function _showTS(i){
   _tsReady=false;
+  // a pending "your turn" reveal belongs to the previous slide
+  clearTimeout(_tutCtaT);_tutCtaT=null;
   document.getElementById('tc-btn-wrap').style.display='none';
   document.getElementById('tc-confirm').style.display='none';
   const s=TUT_STEPS[i];
@@ -10834,7 +10876,8 @@ function _showTS(i){
     const body=actionParts.slice(0,-1).join('\n\n').replace(/\n/g,'<br>');
     const cta=actionParts[actionParts.length-1];
     actionEl.innerHTML=body+'<div class="tc-cta-wrap" id="tc-cta-wrap"><span class="tc-cta-label">your turn:</span><span class="tc-cta">'+cta+'</span></div>';
-    setTimeout(()=>{const w=document.getElementById('tc-cta-wrap');if(w)w.classList.add('visible');},2000);
+    clearTimeout(_tutCtaT);
+    _tutCtaT=setTimeout(()=>{_tutCtaT=null;const w=document.getElementById('tc-cta-wrap');if(w)w.classList.add('visible');},2000);
   } else {
     actionEl.innerHTML=s.action.replace(/\n/g,'<br>');
   }
@@ -10895,6 +10938,9 @@ function _showTS(i){
 }
 
 function _makeDraggable(el){
+  // wire once — startTutorial used to add three more listeners every open
+  if(!el||el._tutDrag) return;
+  el._tutDrag=true;
   let ox=0,oy=0,sx=0,sy=0,drag=false;
   el.style.cursor='grab';
   el.addEventListener('mousedown',e=>{
@@ -10925,10 +10971,6 @@ window._origMKD=makeKnobDrag;
 makeKnobDrag=function(id,w){const f=window._origMKD(id,w);return function(e){state._tutKnob=true;return f.call(this,e);};};
 window._origTB=toggleBypass;
 toggleBypass=function(id){state._tutBypass=true;return window._origTB(id);};
-window._origTP=takePhoto;
-takePhoto=function(){state._tutCapture=true;return window._origTP();};
-window._origTR=toggleRecord;
-toggleRecord=function(){state._tutCapture=true;return window._origTR();};
 window._origSF=setFx;
 setFx=function(id,idx){if(!state._tutPresets)state._tutPresets=0;state._tutPresets++;return window._origSF(id,idx);};
 // new hooks
@@ -10940,7 +10982,6 @@ window._origTC=toggleCRT;
 toggleCRT=function(){state._tutCRT=true;return window._origTC.apply(this,arguments);};
 // replace hook: fires when a source is successfully loaded into an already-active slot
 (function(){
-  const _origSrcSet=window.setSource||null;
   // watch for the replace button being used — set flag only when source actually loads
   const _origSPM=window.startPickMode;
   if(_origSPM){
@@ -10951,13 +10992,12 @@ toggleCRT=function(){state._tutCRT=true;return window._origTC.apply(this,argumen
     };
   }
 })();
-// FPS warning hook
-(function _watchFPS(){
-  setInterval(()=>{if(typeof _currentFps!=='undefined'&&_currentFps<15&&_currentFps>0)state._tutFpsWarning=true;},1000);
-})();
 
 const _obDB=window.dismissBoot;
-window.dismissBoot=function(){if(_obDB)_obDB();try{const done=localStorage.getItem('morph_tut_done')||localStorage.getItem('morph_tut_seen');if(!done)setTimeout(startTutorial,800);}catch(e){}};
+// auto-start once for first-time users (the boot sequence and a key press
+// can both call dismissBoot)
+let _tutAutoQueued=false;
+window.dismissBoot=function(){if(_obDB)_obDB();if(_tutAutoQueued)return;try{const done=localStorage.getItem('morph_tut_done')||localStorage.getItem('morph_tut_seen');if(!done){_tutAutoQueued=true;setTimeout(startTutorial,800);}}catch(e){}};
 
 // Sync button states to match boot classes (dark + crt on by default)
 (function initBootUI(){
