@@ -2628,17 +2628,28 @@ outputCv.width=W;outputCv.height=H;
 const outputCtx=outputCv.getContext('2d');
 [cvA,cvB,cvMix].forEach(c=>{c.width=W;c.height=H;});
 
+// a tainted canvas can't be cleaned, so swap in a fresh one. it's never attached to the DOM
+// (it used to be appended to <body> on every call — every frame after a SecurityError)
 function resetMixCanvas(){
   const fresh=document.createElement('canvas');
-  fresh.width=W;fresh.height=H;fresh.style.display='none';
-  document.body.appendChild(fresh);
+  fresh.width=W;fresh.height=H;
+  if(cvMix&&cvMix.parentNode&&cvMix.id!=='cv-mix') cvMix.remove();
   cvMix=fresh;
   ctxMix=fresh.getContext('2d',{willReadFrequently:true});
   state.modules.forEach(mod=>{mod.offscreen=null;mod.offCtx=null;if(mod.dmosh)mod.dmosh={iFrame:null,iFrameCounter:0,dispBuf:null,flowBuf:null,flowRef:null,moshBuf:null};});
 }
 
+// preview canvases track their css width. sizes are cached and refreshed by one
+// ResizeObserver (reading offsetWidth for 7+N canvases per UI tick forced layout)
+const _cvW=new WeakMap();
+const _cvRO=typeof ResizeObserver==='function'?new ResizeObserver(es=>{
+  for(const e of es){const el=e.target;
+    if(!el.isConnected){_cvRO.unobserve(el);_cvW.delete(el);continue;}
+    _cvW.set(el,el.offsetWidth);}
+}):null;
 function syncCanvasSize(cv){
-  const w=cv.offsetWidth;
+  let w=_cvW.get(cv);
+  if(w===undefined){w=cv.offsetWidth;if(_cvRO&&cv.isConnected){_cvW.set(cv,w);_cvRO.observe(cv);}}
   if(!w) return;
   if(cv.width!==w){ cv.width=w; cv.height=Math.round(w*9/16); }
 }
@@ -2874,10 +2885,22 @@ function buildCustomSelect(id, opts, currentVal, onChange){
 }
 
 const GLProcessor=(function(){
-  let gl=null,glCanvas=null;
-  const programs={};
-  const textures={src:null,prev:null};
-  let fbo=null,fboTex=null,fboTex2=null,currentFbo=0;
+  // gpu-resident path, no readPixels / row flip / putImageData:
+  // - each module's result lives in its own texture; run() returns the module's accelerated 2d
+  //   canvas (mod._glOut) marked pending. it is filled lazily — the texture is drawn to the gl
+  //   canvas' default framebuffer and drawImage'd into it (same task, so no preserveDrawingBuffer)
+  //   the first time anything drawImage()s it or getImageData()s its context. every gl→2d hop costs
+  //   ~0.8ms of cross-context sync (M1/ANGLE Metal), so a gl→gl chain only pays it once, at the end
+  //   (plus thumbnails on UI frames).
+  // - chaining: if srcCanvas is a gl output canvas, its texture is used directly (no upload).
+  // - uploads keep UNPACK_FLIP_Y, so v_uv.y=0 is the image bottom (the convention the shaders were
+  //   written for) and the default framebuffer shows it upright.
+  let gl=null,glCanvas=null,_ready=false,_gen=0;
+  let programs={},vsObj=null,fbo=null,pool=[];
+  let texSrc=null,texB=null;           // upload targets {t,w,h}
+  const _modGL=new WeakMap();          // per-module persistent textures (color trails)
+  const U={t:0,p:0,pi:0,k:0,time:0,cg:null,pal:null};
+  const UNIFORMS=['u_src','u_b','u_prev','u_t','u_p','u_time','u_res','u_pi','u_k','u_gain','u_pal'];
 
   const VS=`#version 300 es
   in vec2 a_pos;
@@ -2894,37 +2917,48 @@ const GLProcessor=(function(){
   in vec2 v_uv;
   out vec4 fragColor;
   `;
+  // color shaders: modulated r/g/b channel gains applied after the effect (cpu: min(255,v*g))
+  const CFS=FS_BASE+`uniform vec3 u_gain;
+  vec4 G(vec4 c){return vec4(min(c.rgb*u_gain,1.0),c.a);}
+  `;
+  const HSL=`
+      vec3 rgb2hsl(vec3 c){float mx=max(c.r,max(c.g,c.b)),mn=min(c.r,min(c.g,c.b));float l=(mx+mn)/2.0,s=0.0,h=0.0;if(mx!=mn){float d=mx-mn;s=l>0.5?d/(2.0-mx-mn):d/(mx+mn);if(mx==c.r)h=(c.g-c.b)/d+(c.g<c.b?6.0:0.0);else if(mx==c.g)h=(c.b-c.r)/d+2.0;else h=(c.r-c.g)/d+4.0;h/=6.0;}return vec3(h,s,l);}`;
+  const RAND=`
+      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}`;
 
   // ── per-effect fragment shaders ──
   const SHADERS={
+    _copy: FS_BASE+`
+      void main(){fragColor=texture(u_src,v_uv);}`,
     // COLOR
-    hue: FS_BASE+`
-      vec3 rgb2hsl(vec3 c){float mx=max(c.r,max(c.g,c.b)),mn=min(c.r,min(c.g,c.b));float l=(mx+mn)/2.0,s=0.0,h=0.0;if(mx!=mn){float d=mx-mn;s=l>0.5?d/(2.0-mx-mn):d/(mx+mn);if(mx==c.r)h=(c.g-c.b)/d+(c.g<c.b?6.0:0.0);else if(mx==c.g)h=(c.b-c.r)/d+2.0;else h=(c.r-c.g)/d+4.0;h/=6.0;}return vec3(h,s,l);}
+    cgain: CFS+`
+      void main(){fragColor=G(texture(u_src,v_uv));}`,
+    hue: CFS+HSL+`
       float hue2rgb(float p,float q,float t){if(t<0.0)t+=1.0;if(t>1.0)t-=1.0;if(t<1.0/6.0)return p+(q-p)*6.0*t;if(t<0.5)return q;if(t<2.0/3.0)return p+(q-p)*(2.0/3.0-t)*6.0;return p;}
       vec3 hsl2rgb(vec3 c){if(c.y==0.0)return vec3(c.z);float q=c.z<0.5?c.z*(1.0+c.y):c.z+c.y-c.z*c.y,p=2.0*c.z-q;return vec3(hue2rgb(p,q,c.x+1.0/3.0),hue2rgb(p,q,c.x),hue2rgb(p,q,c.x-1.0/3.0));}
-      void main(){vec4 s=texture(u_src,v_uv);vec3 hsl=rgb2hsl(s.rgb);hsl.x=mod(hsl.x+u_p,1.0);vec3 col=mix(s.rgb,hsl2rgb(hsl),u_t);fragColor=vec4(col,s.a);}`,
-    sat: FS_BASE+`
-      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));fragColor=vec4(mix(s.rgb,mix(vec3(lum),s.rgb,u_p),u_t),s.a);}`,
-    false_color: FS_BASE+`
-      uniform int u_pi;
-      vec3 fc(float t,int p){
-        vec3 pals[5*4];
-        pals[0]=vec3(0,0,0.5);pals[1]=vec3(0,0.5,1);pals[2]=vec3(0,1,0.5);pals[3]=vec3(1,1,0);pals[4]=vec3(1,0,0);
-        pals[5]=vec3(0,0,0);pals[6]=vec3(0.5,0,0.5);pals[7]=vec3(1,0,1);pals[8]=vec3(1,0.5,0);pals[9]=vec3(1,1,1);
-        pals[10]=vec3(0,0.25,0);pals[11]=vec3(0,0.63,0);pals[12]=vec3(0.5,1,0);pals[13]=vec3(1,1,0.5);pals[14]=vec3(1,1,1);
-        pals[15]=vec3(0.08,0.08,0.08);pals[16]=vec3(0.24,0,0.31);pals[17]=vec3(0.71,0,0.47);pals[18]=vec3(1,0.31,0);pals[19]=vec3(1,0.86,0.39);
-        float s2=t*3.0;int i=int(s2);float f=fract(s2);i=clamp(i,0,3);
-        vec3 a=pals[p*5+i],b2=pals[p*5+min(i+1,4)];return mix(a,b2,f);}
-      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));vec3 col=fc(lum,u_pi);fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
-    palette: FS_BASE+`
-      void main(){vec4 s=texture(u_src,v_uv);float steps=max(2.0,2.0+(1.0-u_p)*30.0);float q=255.0/(steps-1.0)/255.0;vec3 col=round(s.rgb/q)*q;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
-    channel: FS_BASE+`
-      void main(){vec4 s=texture(u_src,v_uv);int m=int(u_p*4.99);vec3 col;if(m==0)col=vec3(s.g,s.b,s.r);else if(m==1)col=vec3(s.b,s.r,s.g);else if(m==2)col=vec3(1.0-s.r,s.g,s.b);else if(m==3)col=vec3(s.r,1.0-s.g,s.b);else col=1.0-s.rgb;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
-    duo: FS_BASE+`
+      void main(){vec4 s=texture(u_src,v_uv);vec3 hsl=rgb2hsl(s.rgb);hsl.x=mod(hsl.x+u_p,1.0);vec3 col=mix(s.rgb,hsl2rgb(hsl),u_t);fragColor=G(vec4(col,s.a));}`,
+    sat: CFS+`
+      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));fragColor=G(vec4(mix(s.rgb,mix(vec3(lum),s.rgb,u_p),u_t),s.a));}`,
+    // palette comes in as a uniform (was a 20-entry local array built per pixel: ~2.5ms of gpu time)
+    false_color: CFS+`
+      uniform vec3 u_pal[5];
+      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));float s2=lum*3.0;int i=clamp(int(s2),0,3);vec3 col=mix(u_pal[i],u_pal[min(i+1,4)],fract(s2));fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    palette: CFS+`
+      void main(){vec4 s=texture(u_src,v_uv);float steps=max(2.0,2.0+(1.0-u_p)*30.0);float q=255.0/(steps-1.0)/255.0;vec3 col=round(s.rgb/q)*q;fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    channel: CFS+`
+      void main(){vec4 s=texture(u_src,v_uv);int m=int(u_p*4.99);vec3 col;if(m==0)col=vec3(s.g,s.b,s.r);else if(m==1)col=vec3(s.b,s.r,s.g);else if(m==2)col=vec3(1.0-s.r,s.g,s.b);else if(m==3)col=vec3(s.r,1.0-s.g,s.b);else col=1.0-s.rgb;fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    duo: CFS+`
       vec3 hsl2rgb2(float h,float s,float l){float q=l<0.5?l*(1.0+s):l+s-l*s,p2=2.0*l-q;float t3=h/360.0;vec3 c;float t1=t3+1.0/3.0,t2=t3,t4=t3-1.0/3.0;float arr[3];arr[0]=t1;arr[1]=t2;arr[2]=t4;for(int i=0;i<3;i++){float tv=arr[i];if(tv<0.0)tv+=1.0;if(tv>1.0)tv-=1.0;if(tv<1.0/6.0)arr[i]=p2+(q-p2)*6.0*tv;else if(tv<0.5)arr[i]=q;else if(tv<2.0/3.0)arr[i]=p2+(q-p2)*(2.0/3.0-tv)*6.0;else arr[i]=p2;}return vec3(arr[0],arr[1],arr[2]);}
-      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));vec3 tc=hsl2rgb2(u_p*360.0,1.0,0.5);vec3 col=lum*tc;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
-    lut: FS_BASE+`
-      void main(){vec4 s=texture(u_src,v_uv);int li=int(u_p*2.99);vec3 col;float l=dot(s.rgb,vec3(0.299,0.587,0.114));if(li==0)col=1.0-s.rgb;else if(li==1)col=vec3(min(1.0,l*1.2),min(1.0,l*0.9),min(1.0,l*0.6));else col=vec3(min(1.0,l*0.6),min(1.0,l*1.1),min(1.0,l*1.4));fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
+      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));vec3 tc=hsl2rgb2(u_p*360.0,1.0,0.5);vec3 col=lum*tc;fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    lut: CFS+`
+      void main(){vec4 s=texture(u_src,v_uv);int li=int(u_p*2.99);vec3 col;float l=dot(s.rgb,vec3(0.299,0.587,0.114));if(li==0)col=1.0-s.rgb;else if(li==1)col=vec3(min(1.0,l*1.2),min(1.0,l*0.9),min(1.0,l*0.6));else col=vec3(min(1.0,l*0.6),min(1.0,l*1.1),min(1.0,l*1.4));fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    // color trails: buf=max(buf*decay,src) in a persistent per-module texture (u_prev), then mix
+    cfb_buf: FS_BASE+`
+      uniform sampler2D u_prev;uniform float u_k;
+      void main(){vec4 s=texture(u_src,v_uv);vec3 b=u_k>0.5?s.rgb:max(texture(u_prev,v_uv).rgb*(0.5+u_p*0.49),s.rgb);fragColor=vec4(b,1.0);}`,
+    cfb_mix: CFS+`
+      uniform sampler2D u_b;
+      void main(){vec4 s=texture(u_b,v_uv);fragColor=G(vec4(mix(s.rgb,texture(u_src,v_uv).rgb,u_t),s.a));}`,
     // GEOMETRY
     geom_scale: FS_BASE+`
       void main(){float zoom=1.0+(u_p*3.0-1.0)*u_t;vec2 uv=(v_uv-0.5)/zoom+0.5;fragColor=texture(u_src,uv);}`,
@@ -2945,48 +2979,56 @@ const GLProcessor=(function(){
       void main(){vec4 s=texture(u_src,v_uv);float levels=max(2.0,2.0+u_p*14.0);vec3 col=floor(s.rgb*levels)/levels;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
     po_threshold: FS_BASE+`
       void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));float v=lum>u_p?1.0:0.0;fragColor=vec4(mix(s.rgb,vec3(v),u_t),s.a);}`,
-    po_bloom: FS_BASE+`
-      void main(){vec2 px=1.0/u_res;vec4 s=texture(u_src,v_uv);vec3 bloom=vec3(0);float r=max(1.0,u_p*8.0);float w=0.0;for(int x=-3;x<=3;x++)for(int y=-3;y<=3;y++){float d=float(x*x+y*y);float wt=exp(-d/(r*r));bloom+=texture(u_src,v_uv+vec2(float(x),float(y))*px).rgb*wt;w+=wt;}bloom/=w;fragColor=vec4(mix(s.rgb,bloom,u_t*0.7)+s.rgb*u_t*0.3,s.a);}`,
+    // bloom: the old 7×7 gaussian split into two 7-tap passes (same weights, it's separable); v pass mixes with the source (u_b)
+    po_bloom_h: FS_BASE+`
+      void main(){float px=1.0/u_res.x;float r=max(1.0,u_p*8.0);vec3 c=vec3(0);float w=0.0;for(int x=-3;x<=3;x++){float wt=exp(-float(x*x)/(r*r));c+=texture(u_src,v_uv+vec2(float(x)*px,0)).rgb*wt;w+=wt;}fragColor=vec4(c/w,1.0);}`,
+    po_bloom_v: FS_BASE+`
+      uniform sampler2D u_b;
+      void main(){float px=1.0/u_res.y;float r=max(1.0,u_p*8.0);vec3 c=vec3(0);float w=0.0;for(int y=-3;y<=3;y++){float wt=exp(-float(y*y)/(r*r));c+=texture(u_src,v_uv+vec2(0,float(y)*px)).rgb*wt;w+=wt;}vec3 bloom=c/w;vec4 s=texture(u_b,v_uv);fragColor=vec4(mix(s.rgb,bloom,u_t*0.7)+s.rgb*u_t*0.3,s.a);}`,
     po_aberration: FS_BASE+`
       void main(){float shift=u_p*u_t*0.02;float r=texture(u_src,v_uv+vec2(shift,0)).r;float g=texture(u_src,v_uv).g;float b=texture(u_src,v_uv-vec2(shift,0)).b;fragColor=vec4(r,g,b,1);}`,
+    // erode/dilate: square (2r+1)² min/max, r=max(1,round(p*4)), done as two separable passes (exact for min/max)
+    po_erode_h: FS_BASE+`
+      void main(){float px=1.0/u_res.x;int r=max(1,int(floor(u_p*4.0+0.5)));vec3 m=vec3(1);for(int i=-4;i<=4;i++){if(i<-r||i>r)continue;m=min(m,texture(u_src,v_uv+vec2(float(i)*px,0)).rgb);}fragColor=vec4(m,1.0);}`,
+    po_erode_v: FS_BASE+`
+      uniform sampler2D u_b;
+      void main(){float px=1.0/u_res.y;int r=max(1,int(floor(u_p*4.0+0.5)));vec3 m=vec3(1);for(int i=-4;i<=4;i++){if(i<-r||i>r)continue;m=min(m,texture(u_src,v_uv+vec2(0,float(i)*px)).rgb);}fragColor=vec4(mix(texture(u_b,v_uv).rgb,m,u_t),1.0);}`,
+    po_dilate_h: FS_BASE+`
+      void main(){float px=1.0/u_res.x;int r=max(1,int(floor(u_p*4.0+0.5)));vec3 m=vec3(0);for(int i=-4;i<=4;i++){if(i<-r||i>r)continue;m=max(m,texture(u_src,v_uv+vec2(float(i)*px,0)).rgb);}fragColor=vec4(m,1.0);}`,
+    po_dilate_v: FS_BASE+`
+      uniform sampler2D u_b;
+      void main(){float px=1.0/u_res.y;int r=max(1,int(floor(u_p*4.0+0.5)));vec3 m=vec3(0);for(int i=-4;i<=4;i++){if(i<-r||i>r)continue;m=max(m,texture(u_src,v_uv+vec2(0,float(i)*px)).rgb);}fragColor=vec4(mix(texture(u_b,v_uv).rgb,m,u_t),1.0);}`,
     // SIGNALNOISE
-    sn_rgb: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_rgb: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);float a=u_p*u_t*0.3;vec3 n=vec3(rand(v_uv+u_time),rand(v_uv+u_time+0.1),rand(v_uv+u_time+0.2))-0.5;fragColor=vec4(clamp(s.rgb+n*a,0.0,1.0),s.a);}`,
-    sn_luma: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_luma: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);float n=(rand(v_uv+u_time)-0.5)*u_p*u_t*0.3;fragColor=vec4(clamp(s.rgb+n,0.0,1.0),s.a);}`,
-    sn_chroma: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_chroma: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);float a=u_p*u_t*0.3;float nr=(rand(v_uv+u_time)-0.5)*a;float nb=(rand(v_uv+u_time+0.3)-0.5)*a;fragColor=vec4(clamp(s.r+nr,0.0,1.0),s.g,clamp(s.b+nb,0.0,1.0),s.a);}`,
     sn_quantize: FS_BASE+`
       void main(){vec4 s=texture(u_src,v_uv);float steps=max(2.0,floor((1.0-u_p)*32.0*u_t)+2.0);float step=1.0/steps;vec3 col=floor(s.rgb/step)*step;fragColor=vec4(col,s.a);}`,
-    sn_saltpepper: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_saltpepper: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);float r=rand(v_uv+u_time);if(r<u_p*u_t*0.04){float v=rand(v_uv+u_time+1.0)<0.5?0.0:1.0;fragColor=vec4(v,v,v,1);}else fragColor=s;}`,
-    sn_bitflip: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_bitflip: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);if(rand(v_uv+u_time)<u_p*u_t*0.02){int ch=int(rand(v_uv+u_time+2.0)*3.0);int bit=int(pow(2.0,floor(rand(v_uv+u_time+3.0)*8.0)));if(ch==0)s.r=float(int(s.r*255.0)^bit)/255.0;else if(ch==1)s.g=float(int(s.g*255.0)^bit)/255.0;else s.b=float(int(s.b*255.0)^bit)/255.0;}fragColor=s;}`,
     // ROWSHIFT (full GPU horizontal shift effects)
     rs_interlace: FS_BASE+`
       void main(){float shift=u_p*30.0*u_t/u_res.x;vec2 uv=v_uv;uv.x+=mod(floor(uv.y*u_res.y),2.0)==0.0?shift:-shift;fragColor=texture(u_src,uv);}`,
-    rs_drift: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    rs_drift: FS_BASE+RAND+`
       void main(){float maxS=u_p*40.0*u_t/u_res.x;float row=floor(v_uv.y*u_res.y);float shift=(rand(vec2(row,0.5))-0.5)*2.0*maxS;fragColor=texture(u_src,vec2(fract(v_uv.x+shift),v_uv.y));}`,
-    rs_jitter: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    rs_jitter: FS_BASE+RAND+`
       void main(){float row=floor(v_uv.y*u_res.y);float maxJ=u_p*15.0*u_t/u_res.x;float shift=rand(vec2(row,u_time))<0.4*u_t?(rand(vec2(row,u_time+1.0))-0.5)*2.0*maxJ:0.0;fragColor=texture(u_src,vec2(fract(v_uv.x+shift),v_uv.y));}`,
     rs_wave: FS_BASE+`
       void main(){float wave=sin(v_uv.y*6.2832*4.0+u_time*2.0)*u_p*20.0*u_t/u_res.x;float row=floor(v_uv.y*u_res.y);float drift=(fract(sin(dot(vec2(row,0.5),vec2(12.98,78.23)))*43758.5)-0.5)*2.0*u_p*30.0*u_t/u_res.x;fragColor=texture(u_src,vec2(fract(v_uv.x+wave+drift),v_uv.y));}`,
-    // DATAMOSH GPU-friendly
+    // DATAMOSH GPU-friendly (warp: u_time is seconds; the cpu path uses ms*0.002 → 2 rad/s)
     dm_warp: FS_BASE+`
-      void main(){float freq=1.0+u_p*8.0;float amp=u_t*20.0/u_res.x;float off=sin(v_uv.y*freq*6.2832+u_time*0.002)*amp;fragColor=texture(u_src,vec2(clamp(v_uv.x+off,0.0,1.0),v_uv.y));}`,
+      void main(){float freq=1.0+u_p*8.0;float amp=u_t*20.0/u_res.x;float off=sin(v_uv.y*freq*6.2832+u_time*2.0)*amp;fragColor=texture(u_src,vec2(clamp(v_uv.x+off,0.0,1.0),v_uv.y));}`,
     dm_bitcrush: FS_BASE+`
       void main(){vec4 s=texture(u_src,v_uv);float levels=max(2.0,2.0+(1.0-u_p)*62.0);float q=1.0/(levels-1.0);vec3 col=round(s.rgb/q)*q;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
     dm_disp_gl: FS_BASE+`
       uniform sampler2D u_prev;
       void main(){float scale=u_p*30.0*u_t;vec2 d=texture(u_prev,v_uv).rg*2.0-1.0;float lum=dot(texture(u_prev,v_uv).rgb,vec3(0.299,0.587,0.114));float angle=lum*6.2832;vec2 uv=v_uv+vec2(cos(angle),sin(angle))*scale/u_res;fragColor=texture(u_src,clamp(uv,0.0,1.0));}`,
-    // KEYER
+    // KEYER — u_src = upstream chain (background), u_b = raw B (key source); B shows where the key is not met
     keyer_luma_dark: FS_BASE+`
       uniform sampler2D u_b;
       void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float lum=dot(b.rgb,vec3(0.299,0.587,0.114));float alpha=lum<u_p?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
@@ -2995,16 +3037,24 @@ const GLProcessor=(function(){
       void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float lum=dot(b.rgb,vec3(0.299,0.587,0.114));float alpha=lum>u_p?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
     keyer_chroma_green: FS_BASE+`
       uniform sampler2D u_b;
-      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float g=b.g-(b.r+b.b)/2.0;float alpha=g>u_p*0.31?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float g=b.g-(b.r+b.b)/2.0;float alpha=g>u_p*80.0/255.0?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
     keyer_chroma_blue: FS_BASE+`
       uniform sampler2D u_b;
-      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float bl=b.b-(b.r+b.g)/2.0;float alpha=bl>u_p*0.31?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float bl=b.b-(b.r+b.g)/2.0;float alpha=bl>u_p*80.0/255.0?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
     keyer_luma_invert: FS_BASE+`
       uniform sampler2D u_b;
       void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float lum=dot(b.rgb,vec3(0.299,0.587,0.114));float alpha=lum>u_p?1.0:0.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+    keyer_chroma_custom: FS_BASE+HSL+`
+      uniform sampler2D u_b;
+      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float d=abs(rgb2hsl(b.rgb).x*360.0-u_p*360.0);d=min(d,360.0-d);float alpha=d<40.0?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+    keyer_isolate: FS_BASE+HSL+`
+      uniform sampler2D u_b;
+      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float d=abs(rgb2hsl(b.rgb).x*360.0-u_p*360.0);d=min(d,360.0-d);float alpha=d<40.0?1.0:0.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+    keyer_contrast: FS_BASE+`
+      uniform sampler2D u_b;
+      void main(){const vec3 Y=vec3(0.299,0.587,0.114);vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float l=dot(b.rgb,Y);float ln=gl_FragCoord.x<u_res.x-1.0?dot(texture(u_b,v_uv+vec2(1.0/u_res.x,0)).rgb,Y):l;float alpha=abs(l-ln)>u_p?1.0:0.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
     // VHS GPU shaders
-    vhs_tracking: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    vhs_tracking: FS_BASE+RAND+`
       void main(){vec2 uv=v_uv;float n=rand(vec2(uv.y*100.0,u_time));float shift=(n-0.5)*u_t*u_p*0.05;uv.x+=shift;vec4 s=texture(u_src,uv);float noise=(rand(uv+u_time)-0.5)*0.1*u_t;fragColor=vec4(clamp(s.rgb+noise,0.0,1.0),s.a);}`,
     vhs_colorbleed: FS_BASE+`
       void main(){float sh=u_p*u_t*0.015;vec4 s=texture(u_src,v_uv);float r=texture(u_src,v_uv+vec2(sh,0)).r;float b=texture(u_src,v_uv-vec2(sh,0)).b;fragColor=vec4(r,s.g,b,s.a);}`,
@@ -3012,25 +3062,33 @@ const GLProcessor=(function(){
       void main(){vec4 s=texture(u_src,v_uv);float w=sin(v_uv.y*50.0+u_time*3.0)*0.015*u_t*u_p;float lum=dot(s.rgb,vec3(0.299,0.587,0.114));fragColor=vec4(clamp(s.rgb+w,0.0,1.0),s.a);}`,
     vhs_chromashift: FS_BASE+`
       void main(){float sh=u_p*u_t*0.02;float r=texture(u_src,v_uv+vec2(sh,sh*0.5)).r;float g=texture(u_src,v_uv).g;float b=texture(u_src,v_uv-vec2(sh,sh*0.5)).b;fragColor=vec4(r,g,b,1);}`,
-    vhs_headswitch: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    vhs_headswitch: FS_BASE+RAND+`
       void main(){vec2 uv=v_uv;float row=floor(uv.y*u_res.y);if(row<u_res.y*0.05&&rand(vec2(u_time,row))<u_t*u_p){uv.x=fract(uv.x+(rand(vec2(row,u_time))-0.5)*0.3);}fragColor=texture(u_src,uv);}`,
   };
 
-  function initGL(){
-    glCanvas=document.createElement('canvas');
-    glCanvas.width=W;glCanvas.height=H;
-    gl=glCanvas.getContext('webgl2',{preserveDrawingBuffer:true,antialias:false,alpha:false});
-    if(!gl){console.warn('WebGL2 not available, using CPU fallback');return false;}
-    // fullscreen quad
-    const buf=gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER,buf);
-    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
-    // allocate FBO textures for ping-pong
-    fboTex=_mkTex();fboTex2=_mkTex();
-    fbo=gl.createFramebuffer();
-    return true;
-  }
+  // false-color palettes (the gl table; indexed by floor(param*3.99))
+  const FC_PAL=[
+    [0,0,0.5, 0,0.5,1, 0,1,0.5, 1,1,0, 1,0,0],
+    [0,0,0, 0.5,0,0.5, 1,0,1, 1,0.5,0, 1,1,1],
+    [0,0.25,0, 0,0.63,0, 0.5,1,0, 1,1,0.5, 1,1,1],
+    [0.08,0.08,0.08, 0.24,0,0.31, 0.71,0,0.47, 1,0.31,0, 1,0.86,0.39]
+  ].map(a=>new Float32Array(a));
+
+  // multi-pass / stateful effects: (srcTex, extraTex, mod, dstTex) → dstTex (or false)
+  const PIPES={
+    po_bloom:(s,ex,mod,d)=>{const a=_pass('po_bloom_h',s,null,_pick(s,d));return a&&_pass('po_bloom_v',a,s,d);},
+    po_erode:(s,ex,mod,d)=>{const a=_pass('po_erode_h',s,null,_pick(s,d));return a&&_pass('po_erode_v',a,s,d);},
+    po_dilate:(s,ex,mod,d)=>{const a=_pass('po_dilate_h',s,null,_pick(s,d));return a&&_pass('po_dilate_v',a,s,d);},
+    cfb:(s,ex,mod,d)=>{
+      let st=_modGL.get(mod);
+      if(!st||st.gen!==_gen||st.w!==W||st.h!==H){st={a:_mkTex(),b:_mkTex(),w:W,h:H,gen:_gen,init:true};_modGL.set(mod,st);}
+      U.k=st.init?1:0;
+      const b=_pass('cfb_buf',s,st.a,st.b);
+      if(!b) return false;
+      st.init=false;const tmp=st.a;st.a=st.b;st.b=tmp;   // st.a = current trail buffer
+      return _pass('cfb_mix',st.a,s,d);
+    },
+  };
 
   function _mkTex(){
     const t=gl.createTexture();
@@ -3042,97 +3100,113 @@ const GLProcessor=(function(){
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
     return t;
   }
+  // a W×H pool texture that is none of the given (still needed) textures
+  function _pick(a,b){
+    for(const t of pool) if(t!==a&&t!==b) return t;
+    const t=_mkTex();pool.push(t);return t;
+  }
 
-  function _compile(name,fsSrc){
-    if(programs[name]) return programs[name];
-    const vs=gl.createShader(gl.VERTEX_SHADER);gl.shaderSource(vs,VS);gl.compileShader(vs);
-    const fs=gl.createShader(gl.FRAGMENT_SHADER);gl.shaderSource(fs,fsSrc);gl.compileShader(fs);
-    if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS)){
-      console.warn('GL shader error ['+name+']:',gl.getShaderInfoLog(fs));
-      return null;
-    }
-    const prog=gl.createProgram();gl.attachShader(prog,vs);gl.attachShader(prog,fs);gl.linkProgram(prog);
-    if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){console.warn('GL link error:',gl.getProgramInfoLog(prog));return null;}
-    const buf2=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf2);
+  function _setup(){
+    programs={};pool=[];_gen++;
+    vsObj=gl.createShader(gl.VERTEX_SHADER);gl.shaderSource(vsObj,VS);gl.compileShader(vsObj);
+    if(!gl.getShaderParameter(vsObj,gl.COMPILE_STATUS)){console.warn('GL vertex shader error:',gl.getShaderInfoLog(vsObj));return false;}
+    // fullscreen quad on attrib 0 (bound at link time), set once
+    const buf=gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER,buf);
     gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
-    const loc=gl.getAttribLocation(prog,'a_pos');
-    gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
-    programs[name]={prog,buf:buf2,loc};
-    return programs[name];
-  }
-
-  function _uploadTex(canvas){
-    if(!textures.src) textures.src=_mkTex();
-    gl.bindTexture(gl.TEXTURE_2D,textures.src);
+    gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+    fbo=gl.createFramebuffer();
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,canvas);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
-    return textures.src;
-  }
-
-  function _uploadPrev(canvas){
-    if(!textures.prev) textures.prev=_mkTex();
-    gl.bindTexture(gl.TEXTURE_2D,textures.prev);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,canvas);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
-    return textures.prev;
-  }
-
-  function _run(shaderName,srcTex,uniforms,extraTex){
-    const p=_compile(shaderName,SHADERS[shaderName]);
-    if(!p) return false;
-    // bind output FBO
-    const outTex=currentFbo===0?fboTex:fboTex2;
-    gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,outTex,0);
-    gl.viewport(0,0,W,H);
-    gl.useProgram(p.prog);
-    gl.bindBuffer(gl.ARRAY_BUFFER,p.buf);
-    gl.enableVertexAttribArray(p.loc);gl.vertexAttribPointer(p.loc,2,gl.FLOAT,false,0,0);
-    // src texture unit 0
-    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,srcTex);
-    gl.uniform1i(gl.getUniformLocation(p.prog,'u_src'),0);
-    // uniforms
-    const set=(n,v)=>{const l=gl.getUniformLocation(p.prog,n);if(l!=null)gl.uniform1f(l,v);};
-    const seti=(n,v)=>{const l=gl.getUniformLocation(p.prog,n);if(l!=null)gl.uniform1i(l,v);};
-    set('u_t',uniforms.t||0);set('u_p',uniforms.p||0);
-    set('u_time',performance.now()*0.001);
-    const rl=gl.getUniformLocation(p.prog,'u_res');if(rl)gl.uniform2f(rl,W,H);
-    if(uniforms.pi!==undefined) seti('u_pi',uniforms.pi);
-    if(extraTex){
-      gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,extraTex);
-      gl.uniform1i(gl.getUniformLocation(p.prog,'u_b'),1);
-      gl.uniform1i(gl.getUniformLocation(p.prog,'u_prev'),1);
-    }
-    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
-    currentFbo=1-currentFbo;
-    return outTex;
-  }
-
-  // read result back to a 2D canvas for the rest of the pipeline.
-  // Readback scratch buffers are allocated once and reused every frame —
-  // allocating W*H*4 bytes twice per GL module per frame caused ~470MB/s of
-  // GC pressure at 854×480. Invalidated on resize.
-  let _readBuf=null,_readId=null,_readW=0,_readH=0;
-  function _readToCanvas(tex,dstCtx){
-    if(!tex) return false;
-    gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
-    if(!_readBuf||_readW!==W||_readH!==H){
-      _readBuf=new Uint8Array(W*H*4);
-      _readId=dstCtx.createImageData(W,H);
-      _readW=W;_readH=H;
-    }
-    gl.readPixels(0,0,W,H,gl.RGBA,gl.UNSIGNED_BYTE,_readBuf);
-    // WebGL readPixels is bottom-up; flip rows to match canvas top-down convention
-    const rowBytes=W*4;
-    for(let y=0;y<H;y++) _readId.data.set(_readBuf.subarray((H-1-y)*rowBytes,(H-y)*rowBytes),y*rowBytes);
-    dstCtx.putImageData(_readId,0,0);
+    texSrc={t:gl.createTexture(),w:0,h:0};texB={t:gl.createTexture(),w:0,h:0};
+    [texSrc.t,texB.t].forEach(t=>{gl.bindTexture(gl.TEXTURE_2D,t);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);});
     return true;
   }
 
-  // ensure offscreen canvas exists for a module
+  function initGL(){
+    glCanvas=document.createElement('canvas');
+    glCanvas.width=W;glCanvas.height=H;
+    // alpha kept (un-premultiplied) so transparent sources survive a gl module like the old readback did
+    gl=glCanvas.getContext('webgl2',{preserveDrawingBuffer:false,antialias:false,alpha:true,premultipliedAlpha:false,depth:false,stencil:false});
+    if(!gl){console.warn('WebGL2 not available, using CPU fallback');return false;}
+    glCanvas.addEventListener('webglcontextlost',e=>{e.preventDefault();_ready=false;programs={};pool=[];texSrc=texB=null;fbo=null;vsObj=null;_gen++;console.warn('GL context lost — cpu fallback until restored');});
+    glCanvas.addEventListener('webglcontextrestored',()=>{glCanvas.width=W;glCanvas.height=H;_ready=_setup();});
+    return _setup();
+  }
+
+  // compile once; failures cached as false (no per-frame retry / warn spam)
+  function _prog(name){
+    const c=programs[name];
+    if(c!==undefined) return c;
+    const src=SHADERS[name];
+    if(!src) return programs[name]=false;
+    const fs=gl.createShader(gl.FRAGMENT_SHADER);gl.shaderSource(fs,src);gl.compileShader(fs);
+    if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS)){
+      if(gl.isContextLost()) return false;
+      console.warn('GL shader error ['+name+']:',gl.getShaderInfoLog(fs));gl.deleteShader(fs);
+      return programs[name]=false;
+    }
+    const prog=gl.createProgram();gl.attachShader(prog,vsObj);gl.attachShader(prog,fs);
+    gl.bindAttribLocation(prog,0,'a_pos');gl.linkProgram(prog);gl.deleteShader(fs);
+    if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){
+      if(gl.isContextLost()) return false;
+      console.warn('GL link error ['+name+']:',gl.getProgramInfoLog(prog));gl.deleteProgram(prog);
+      return programs[name]=false;
+    }
+    const L={};UNIFORMS.forEach(n=>{L[n]=gl.getUniformLocation(prog,n);});
+    gl.useProgram(prog);
+    if(L.u_src)gl.uniform1i(L.u_src,0);if(L.u_b)gl.uniform1i(L.u_b,1);if(L.u_prev)gl.uniform1i(L.u_prev,1);
+    return programs[name]={prog,L};
+  }
+
+  function _upload(rec,canvas){
+    gl.bindTexture(gl.TEXTURE_2D,rec.t);
+    const w=canvas.width||canvas.videoWidth||0,h=canvas.height||canvas.videoHeight||0;
+    if(rec.w!==w||rec.h!==h){gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,gl.RGBA,gl.UNSIGNED_BYTE,canvas);rec.w=w;rec.h=h;}
+    else gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,canvas);
+    return rec.t;
+  }
+
+  // one fullscreen pass: src on unit 0, ex (u_b/u_prev) on unit 1, into out (null = default framebuffer)
+  function _pass(name,src,ex,out){
+    const p=_prog(name);
+    if(!p) return false;
+    gl.bindFramebuffer(gl.FRAMEBUFFER,out?fbo:null);
+    if(out) gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,out,0);
+    gl.viewport(0,0,W,H);
+    gl.useProgram(p.prog);
+    gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,ex||null);
+    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,src);
+    const L=p.L;
+    if(L.u_t)gl.uniform1f(L.u_t,U.t);
+    if(L.u_p)gl.uniform1f(L.u_p,U.p);
+    if(L.u_time)gl.uniform1f(L.u_time,U.time);
+    if(L.u_res)gl.uniform2f(L.u_res,W,H);
+    if(L.u_pi)gl.uniform1i(L.u_pi,U.pi);
+    if(L.u_k)gl.uniform1f(L.u_k,U.k);
+    if(L.u_pal)gl.uniform3fv(L.u_pal,U.pal||FC_PAL[0]);
+    if(L.u_gain){const g=U.cg;gl.uniform3f(L.u_gain,g?(g.r??1):1,g?(g.g??1):1,g?(g.b??1):1);}
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    return out||true;
+  }
+
+  // texture behind a gl output canvas, if still current
+  function _texOf(cv){const st=cv._gls;return st&&st.gen===_gen&&st.w===W&&st.h===H?st.tex:null;}
+  // fill a pending output canvas from its texture
+  function _materialize(cv){
+    cv._glp=false;
+    const tex=_ready&&_texOf(cv);
+    if(!tex) return;
+    _pass('_copy',tex,null,null);
+    const c=cv._gls.ctx;c.globalCompositeOperation='copy';_drawImage.call(c,glCanvas,0,0);
+  }
+  // any read of a pending output canvas materializes it first, so callers keep plain canvas semantics
+  const _drawImage=CanvasRenderingContext2D.prototype.drawImage,_getImageData=CanvasRenderingContext2D.prototype.getImageData;
+  CanvasRenderingContext2D.prototype.drawImage=function(img){if(img&&img._glp)_materialize(img);return _drawImage.apply(this,arguments);};
+  CanvasRenderingContext2D.prototype.getImageData=function(){const c=this.canvas;if(c&&c._glp)_materialize(c);return _getImageData.apply(this,arguments);};
+
+  // ensure offscreen canvas exists for a module (processors' cpu paths expect it)
   function _ensureOff(mod){
     if(!mod.offscreen){
       mod.offscreen=document.createElement('canvas');
@@ -3141,37 +3215,63 @@ const GLProcessor=(function(){
     }
   }
 
-  let _ready=false;
-
   return {
     init(){_ready=initGL();return _ready;},
     ready(){return _ready;},
+    frame(){},  // per-frame hook (chaining no longer needs frame tracking)
+    // materialize a pending output canvas now (reads through drawImage/getImageData do it implicitly)
+    flush(cv){if(cv&&cv._glp)_materialize(cv);},
+    // drop a module's gl resources (optional; they are also released when the module is collected)
+    release(mod){
+      const oc=mod._glOut;
+      if(oc){if(_ready&&oc._gls&&oc._gls.gen===_gen)gl.deleteTexture(oc._gls.tex);oc._gls=null;oc._glp=false;oc.width=oc.height=1;}
+      mod._glOut=mod._glOutCtx=null;
+      const st=_modGL.get(mod);if(st&&_ready&&st.gen===_gen){gl.deleteTexture(st.a);gl.deleteTexture(st.b);}
+      _modGL.delete(mod);
+    },
     resize(w,h){
       if(!_ready) return;
       glCanvas.width=w;glCanvas.height=h;
-      if(fboTex) gl.deleteTexture(fboTex);
-      if(fboTex2) gl.deleteTexture(fboTex2);
-      fboTex=_mkTex();fboTex2=_mkTex();
-      if(textures.src){gl.deleteTexture(textures.src);textures.src=null;}
-      if(textures.prev){gl.deleteTexture(textures.prev);textures.prev=null;}
+      pool.forEach(t=>gl.deleteTexture(t));pool=[];
+      texSrc.w=texSrc.h=texB.w=texB.h=0;
+      // module textures are re-created at their next run; pending canvases keep their stale 2d copy
     },
 
-    // Main entry: run a GL shader on srcCanvas, write result to mod.offscreen
-    // Returns mod.offscreen on success, null on failure
+    // Main entry: run a GL effect on srcCanvas (extraCanvas → u_b/u_prev on unit 1).
+    // Returns a canvas (the module's gpu-backed mod._glOut) the caller can drawImage/getImageData
+    // from, or null on failure (caller falls back to cpu). The canvas is owned by GLProcessor:
+    // read it, don't draw into it.
     run(shaderName,mod,srcCanvas,extraCanvas){
-      if(!_ready) return null;
+      if(!_ready||!srcCanvas||(!SHADERS[shaderName]&&!PIPES[shaderName])) return null;
       _ensureOff(mod);
       try{
-        const srcTex=_uploadTex(srcCanvas);
-        let extraTex=null;
-        if(extraCanvas) extraTex=_uploadPrev(extraCanvas);
-        const outTex=_run(shaderName,srcTex,{t:mod.intensity,p:mod.param,pi:(shaderName==='false_color'?Math.floor(mod.param*3.99):mod.activeFx||0)},extraTex);
-        if(!outTex) return null;
-        // reliable readback path (avoids blitFramebuffer sync issues)
-        _readToCanvas(outTex,mod.offCtx);
-        return mod.offscreen;
+        const src=_texOf(srcCanvas)||_upload(texSrc,srcCanvas);
+        const ex=extraCanvas?(_texOf(extraCanvas)||_upload(texB,extraCanvas)):null;
+        // module output canvas + texture
+        let oc=mod._glOut;
+        if(!oc){oc=mod._glOut=document.createElement('canvas');oc.width=W;oc.height=H;mod._glOutCtx=oc.getContext('2d');}
+        else if(oc.width!==W||oc.height!==H){oc.width=W;oc.height=H;}
+        let st=oc._gls;
+        if(!st||st.gen!==_gen||st.w!==W||st.h!==H){
+          if(st&&st.gen===_gen) gl.deleteTexture(st.tex);
+          st=oc._gls={tex:_mkTex(),ctx:mod._glOutCtx,w:W,h:H,gen:_gen};
+        }
+        let dst=st.tex;
+        if(dst===src||dst===ex){const t=_pick(src,ex);pool[pool.indexOf(t)]=dst;st.tex=dst=t;} // never render into an input
+        U.t=mod.intensity||0;U.p=mod.param||0;U.k=0;
+        U.pi=shaderName==='false_color'?Math.floor(U.p*3.99):mod.activeFx||0;
+        U.pal=shaderName==='false_color'?FC_PAL[Math.min(3,Math.max(0,U.pi))]:null;
+        U.cg=mod.channelGain||null;
+        U.time=(performance.now()*0.001)%3600;   // wrapped: noise shaders lose precision on big floats
+        const pipe=PIPES[shaderName];
+        const out=pipe?pipe(src,ex,mod,dst):_pass(shaderName,src,ex,dst);
+        if(!out) return null;
+        oc._glp=true; // filled on first read
+        return oc;
       }catch(e){
-        console.warn('GL run error:',e);
+        // tainted (cross-origin) input: texImage2D throws SecurityError; the cpu fallback will
+        // throw it again from getImageData and renderFrame resets the mix canvas
+        if(e&&e.name!=='SecurityError'&&!mod._glWarned){mod._glWarned=true;console.warn('GL run error:',e);}
         return null;
       }
     }
@@ -3183,20 +3283,29 @@ GLProcessor.init();
 
 // ── PERFORMANCE GOVERNOR ──
 // Adaptive quality ladder that defends a 24fps floor. Evaluated once per
-// second from measured FPS. Levels trade quality for speed with hysteresis
-// so it never oscillates:
+// second from the measured frame COST (mean ms spent inside renderFrame over
+// the last second), not the raw rAF count — a browser that throttles rAF
+// (battery saver 30fps cap, 30Hz display, background/embedded panes) says
+// nothing about whether our work fits. Levels trade quality for speed with
+// hysteresis so it never oscillates:
 //   L0 — full quality
 //   L1 — heavy modules process every other frame (cached result reuse),
 //        UI thumbnails throttle to 8fps
 //   L2 — L1 + internal processing resolution drops to 0.75×
 //   L3 — L1 + internal processing resolution drops to 0.5×
-// Demote: fps < GOV_LOW steps down one level per second.
-// Promote: fps ≥ GOV_HIGH for GOV_RECOVER_SECS consecutive seconds steps up.
+// Demote: cost > GOV_COST_HI steps down one level per second.
+// Promote: cost < GOV_COST_LO for GOV_RECOVER_SECS consecutive seconds steps up.
+// (HI/LO ratio > the biggest per-level pixel ratio, 2.25, so a promotion can't
+// immediately re-trigger a demotion.) Ticks are skipped while the tab is
+// hidden or after a >2s gap (tab switch, sleep).
 let _currentFps=60;
 let _perfLevel=0;
-const GOV_LOW=28, GOV_HIGH=50, GOV_RECOVER_SECS=3, GOV_MAX_LEVEL=3;
+const GOV_LOW=28, GOV_HIGH=50;           // fps thresholds (legacy, informational)
+const GOV_COST_HI=25, GOV_COST_LO=10;    // ms of renderFrame work per frame
+const GOV_RECOVER_SECS=3, GOV_MAX_LEVEL=3;
 const GOV_SCALE=[1, 1, 0.75, 0.5];
 let _govGoodSecs=0;
+let _costSum=0,_costN=0,_frameCost=0;    // _frameCost = mean ms/frame over the last second
 
 function _governorApplyRes(){
   const s=GOV_SCALE[_perfLevel];
@@ -3205,12 +3314,13 @@ function _governorApplyRes(){
   _applyResolution(w,h);
 }
 
-function _governorTick(fps){
+function _governorTick(fps,cost){
+  if(cost==null) cost=_frameCost;
   const prev=_perfLevel;
-  if(fps<GOV_LOW && _perfLevel<GOV_MAX_LEVEL){
+  if(cost>GOV_COST_HI && _perfLevel<GOV_MAX_LEVEL){
     _perfLevel++;
     _govGoodSecs=0;
-  } else if(fps>=GOV_HIGH && _perfLevel>0){
+  } else if(cost<GOV_COST_LO && _perfLevel>0){
     _govGoodSecs++;
     if(_govGoodSecs>=GOV_RECOVER_SECS){ _perfLevel--; _govGoodSecs=0; }
   } else {
@@ -3223,19 +3333,53 @@ function _governorTick(fps){
   }
 }
 
+// output window canvas, looked up once per window (was getElementById every frame)
+let _ocWin=null,_ocEl=null,_ocCtx=null,_liveIndOn=false,_frameSrcB=undefined;
+function _drawOutputWin(){
+  const ow=state.outputWin;
+  if(!ow||!state._outputWinReady) return;
+  if(ow.closed){_ocWin=_ocEl=_ocCtx=null;return;} // the close-watcher resets streaming state
+  try{
+    if(_ocWin!==ow||!_ocEl||!_ocEl.isConnected){
+      _ocWin=ow;_ocEl=ow.document.getElementById('c');_ocCtx=_ocEl?_ocEl.getContext('2d'):null;
+    }
+    if(_ocCtx){
+      if(_ocEl.width!==W||_ocEl.height!==H){_ocEl.width=W;_ocEl.height=H;}
+      _ocCtx.drawImage(outputCv,0,0);
+    }
+  }catch(e){_ocWin=_ocEl=_ocCtx=null;}
+}
+// full-rate outputs fed from outputCv: recording canvas, pip, audience window (every frame —
+// it's a gpu drawImage; the old >=33ms gate capped the audience at ~30fps with uneven pacing)
+function _feedOutputs(){
+  if(typeof recorder!=='undefined'&&recorder&&recorder.state==='recording') _drawRecFrame();
+  if(!state.outputStreaming) updatePip(outputCv);
+  _drawOutputWin();
+}
+function _drawPreview(cv,src){
+  if(!cv) return;
+  syncCanvasSize(cv);
+  const c=cv.getContext('2d');
+  c.fillStyle='#000';c.fillRect(0,0,cv.width,cv.height);
+  if(src) c.drawImage(src,0,0,cv.width,cv.height);
+}
+
 function renderFrame(){
   requestAnimationFrame(renderFrame);
+  const _now=performance.now();
   state.frames++;
 
   // throttle UI thumbnail updates — 8fps when streaming or in eco mode, 15fps otherwise
-  const _now=performance.now();
   if(!state._lastUiDraw) state._lastUiDraw=0;
   const _uiInterval=(state.outputStreaming||_perfLevel>=1) ? 120 : 66;
   const _drawUi=(_now-state._lastUiDraw)>=_uiInterval;
   if(_drawUi) state._lastUiDraw=_now;
+  state.drawUi=_drawUi; // true on frames where UI thumbnails redraw (others can throttle to it)
+  if(GLProcessor.ready()) GLProcessor.frame();
 
   const cvA2=getSourceCanvas('A');
   const cvB2=getSourceCanvas('B');
+  _frameSrcB=cvB2; // processors reuse this frame's B (keyer) instead of re-rendering the source
 
   // update left panel previews (throttled)
   if(_drawUi) ['A','B'].forEach(s=>{
@@ -3272,9 +3416,14 @@ function renderFrame(){
   });
 
   if(!cvA2&&!cvB2){
-    // nothing to render — still tick modulators
+    // nothing to render — still tick modulators, and keep the outputs live (black) so the
+    // audience window / recording don't freeze on the last frame
+    _frameSrcB=undefined;
     tickLFOs();tickEnvelopes();tickAudio();tickSequencers();tickPerlin();tickXYPads();tickRandomWalks();
-    _tickFpsCounter();
+    outputCtx.fillStyle='#000';outputCtx.fillRect(0,0,W,H);
+    if(_drawUi){_drawPreview(masterCv,null);_drawPreview(document.getElementById('bot-master-cv'),null);}
+    _feedOutputs();
+    _frameDone(_now);
     return;
   }
 
@@ -3325,8 +3474,11 @@ function renderFrame(){
     }
     if(processed) cur=processed; // only advance if valid
     // only update visible thumbnail at UI rate
-    if(_drawUi&&mod.cv){syncCanvasSize(mod.cv);mod.cv.getContext('2d').drawImage(cur,0,0,mod.cv.width,mod.cv.height);}
+    // (modulators draw their own viz into mod.cv — don't paint the chain over it)
+    if(_drawUi&&mod.cv&&mod.type!=='modulator'){syncCanvasSize(mod.cv);mod.cv.getContext('2d').drawImage(cur,0,0,mod.cv.width,mod.cv.height);}
   });
+
+  _frameSrcB=undefined;
 
   // run modulators
   tickLFOs();
@@ -3337,52 +3489,46 @@ function renderFrame(){
   tickXYPads();
   tickRandomWalks();
 
-  if(_drawUi){syncCanvasSize(masterCv);masterCtx.fillStyle='#000';masterCtx.fillRect(0,0,masterCv.width,masterCv.height);masterCtx.drawImage(cur,0,0,masterCv.width,masterCv.height);}
+  if(_drawUi){_drawPreview(masterCv,cur);_drawPreview(document.getElementById('bot-master-cv'),cur);}
   // draw to full-res output canvas (used for stream, photo, recording)
   outputCtx.fillStyle='#000';outputCtx.fillRect(0,0,W,H);
   outputCtx.drawImage(cur,0,0,W,H);
-  // feed the fixed-720p recording canvas while a recording is running
-  if(typeof recorder!=='undefined'&&recorder&&recorder.state==='recording') _drawRecFrame();
-  if(!state.outputStreaming) updatePip(outputCv);
-  // draw to bottom panel master preview
-  if(_drawUi){const botMaster=document.getElementById('bot-master-cv');if(botMaster){syncCanvasSize(botMaster);botMaster.getContext('2d').fillStyle='#000';botMaster.getContext('2d').fillRect(0,0,botMaster.width,botMaster.height);botMaster.getContext('2d').drawImage(cur,0,0,botMaster.width,botMaster.height);}}
-  document.getElementById('live-ind').style.display='';
+  _feedOutputs();
+  if(!_liveIndOn){const li=document.getElementById('live-ind');if(li){li.style.display='';_liveIndOn=true;}}
 
-  if(state.outputWin && !state.outputWin.closed && state._outputWinReady){
-    if(!state._lastBcFrame) state._lastBcFrame=0;
-    const _bcNow=performance.now();
-    if(_bcNow-state._lastBcFrame>=33){
-      state._lastBcFrame=_bcNow;
-      try{
-        const oc=state.outputWin.document.getElementById('c');
-        if(oc){
-          if(oc.width!==W||oc.height!==H){oc.width=W;oc.height=H;}
-          oc.getContext('2d').drawImage(outputCv,0,0);
-        }
-      }catch(e){}
-    }
-  }
+  _frameDone(_now);
+}
 
+// per-frame cost sample (capped so one hitch — a file load, a gc — can't demote on its own)
+function _frameDone(t0){
+  _costSum+=Math.min(100,performance.now()-t0);_costN++;
   _tickFpsCounter();
 }
 
 // shared once-per-second FPS counter + governor hook (used by both render paths)
 function _tickFpsCounter(){
-  const now=performance.now();
-  if(now-state.lastFps<=1000) return;
-  _currentFps=state.frames;
-  const fpsEl=document.getElementById('fps-num');
+  const now=performance.now(),dt=now-state.lastFps;
+  if(dt<=1000) return;
+  const fps=Math.round(state.frames*1000/dt); // normalized to elapsed time (ticks land at 1000-1016ms+)
+  _currentFps=fps;
+  _frameCost=_costN?_costSum/_costN:0;
+  _costSum=0;_costN=0;
   const fpsBig=document.getElementById('fps-big');
-  if(fpsEl) fpsEl.textContent=state.frames;
   if(fpsBig){
     // the performance governor works silently — no eco badge in the counter
-    if(state.frames<=15){
-      fpsBig.innerHTML='<span style="animation:blink 0.7s steps(2,end) infinite;">⚠</span> <span id="fps-num">'+state.frames+'</span> FPS <span style="animation:blink 0.7s steps(2,end) infinite;">⚠</span>';
+    if(fps<=15){
+      fpsBig.innerHTML='<span style="animation:blink 0.7s steps(2,end) infinite;">⚠</span> <span id="fps-num">'+fps+'</span> FPS <span style="animation:blink 0.7s steps(2,end) infinite;">⚠</span>';
     } else {
-      fpsBig.innerHTML='<span id="fps-num">'+state.frames+'</span> FPS';
+      fpsBig.innerHTML='<span id="fps-num">'+fps+'</span> FPS';
     }
+  } else {
+    const fpsEl=document.getElementById('fps-num');
+    if(fpsEl) fpsEl.textContent=fps;
   }
-  _governorTick(state.frames);
+  if(pipActive){const lbl=document.getElementById('pip-fps-label');if(lbl) lbl.textContent=fps+' fps';}
+  // hidden tab / long gap (tab switch, sleep): the sample isn't representative — skip
+  if(!document.hidden&&dt<=2000) _governorTick(fps,_frameCost);
+  else _govGoodSecs=0;
   state.frames=0; state.lastFps=now;
 }
 requestAnimationFrame(renderFrame);
@@ -3962,20 +4108,22 @@ function setXfade(v,fromMod){
 })();
 
 /* ── COLOR EFFECTS ENGINE ── */
+const _c3=[0,0,0],_h3=[0,0,0]; // scratch for the allocation-free color helpers below
 const COLOR_FX = [
-  { id:'lut',   label:['LUT',''],            param:'preset',  run:(d,len,t,p)=>{ const li=Math.floor(p*3); for(let i=0;i<len;i+=4){ const[r,g,b]=applyLut(d[i],d[i+1],d[i+2],li); d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
-  { id:'sat',   label:['satu','ration'],      param:'amount',  run:(d,len,t,p)=>{ for(let i=0;i<len;i+=4){ const[h,s,l]=rgb2hsl(d[i],d[i+1],d[i+2]); const[r,g,b]=hsl2rgb(h,p,l); d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
+  { id:'lut',   label:['LUT',''],            param:'preset',  run:(d,len,t,p)=>{ const li=Math.floor(p*3); for(let i=0;i<len;i+=4){ const r0=d[i],g0=d[i+1],b0=d[i+2]; let r,g,b; if(li===0){r=255-r0;g=255-g0;b=255-b0;}else{const l=r0*0.299+g0*0.587+b0*0.114; if(li===1){r=Math.min(255,l*1.2);g=Math.min(255,l*0.9);b=Math.min(255,l*0.6);}else{r=Math.min(255,l*0.6);g=Math.min(255,l*1.1);b=Math.min(255,l*1.4);}} d[i]=lerp(r0,r,t);d[i+1]=lerp(g0,g,t);d[i+2]=lerp(b0,b,t); } }},
+  { id:'sat',   label:['satu','ration'],      param:'amount',  run:(d,len,t,p)=>{ const o=_c3,h3=_h3; for(let i=0;i<len;i+=4){ rgb2hslTo(d[i],d[i+1],d[i+2],h3); hsl2rgbTo(h3[0],p,h3[2],o); d[i]=lerp(d[i],o[0],t);d[i+1]=lerp(d[i+1],o[1],t);d[i+2]=lerp(d[i+2],o[2],t); } }},
   { id:'chan',  label:['channel','remap'],    param:'mode',    run:(d,len,t,p)=>{ const m=Math.floor(p*5); for(let i=0;i<len;i+=4){ let r=d[i],g=d[i+1],b=d[i+2]; let nr,ng,nb; if(m===0){nr=g;ng=b;nb=r;}else if(m===1){nr=b;ng=r;nb=g;}else if(m===2){nr=255-r;ng=g;nb=b;}else if(m===3){nr=r;ng=255-g;nb=b;}else{nr=255-r;ng=255-g;nb=255-b;} d[i]=lerp(r,nr,t);d[i+1]=lerp(g,ng,t);d[i+2]=lerp(b,nb,t); } }},
-  { id:'duo',   label:['duo','tone'],         param:'hue',     run:(d,len,t,p)=>{ const[cr,cg,cb]=hsl2rgb(p*360,1,0.5); for(let i=0;i<len;i+=4){ const lum=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114)/255; const r=lum*cr; const g=lum*cg; const b=lum*cb; d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
-  { id:'hue',   label:['hue','rotate'],       param:'hue°',    run:(d,len,t,p)=>{ for(let i=0;i<len;i+=4){ const[h,s,l]=rgb2hsl(d[i],d[i+1],d[i+2]); const[r,g,b]=hsl2rgb((h+p*360)%360,s,l); d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
-  { id:'false', label:['false','color'],      param:'palette', run:(d,len,t,p)=>{ const pi=Math.floor(p*4); for(let i=0;i<len;i+=4){ const lum=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114)/255; const[r,g,b]=falseColor(lum,pi); d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
+  { id:'duo',   label:['duo','tone'],         param:'hue',     run:(d,len,t,p)=>{ const c=hsl2rgbTo(p*360,1,0.5,_c3),cr=c[0],cg=c[1],cb=c[2]; for(let i=0;i<len;i+=4){ const lum=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114)/255; d[i]=lerp(d[i],lum*cr,t);d[i+1]=lerp(d[i+1],lum*cg,t);d[i+2]=lerp(d[i+2],lum*cb,t); } }},
+  { id:'hue',   label:['hue','rotate'],       param:'hue°',    run:(d,len,t,p)=>{ const o=_c3,h3=_h3; for(let i=0;i<len;i+=4){ rgb2hslTo(d[i],d[i+1],d[i+2],h3); hsl2rgbTo((h3[0]+p*360)%360,h3[1],h3[2],o); d[i]=lerp(d[i],o[0],t);d[i+1]=lerp(d[i+1],o[1],t);d[i+2]=lerp(d[i+2],o[2],t); } }},
+  { id:'false', label:['false','color'],      param:'palette', run:(d,len,t,p)=>{ const pi=Math.floor(p*4),o=_c3; for(let i=0;i<len;i+=4){ const lum=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114)/255; falseColorTo(lum,pi,o); d[i]=lerp(d[i],o[0],t);d[i+1]=lerp(d[i+1],o[1],t);d[i+2]=lerp(d[i+2],o[2],t); } }},
   { id:'pal',   label:['palette','reduce'],   param:'depth',   run:(d,len,t,p)=>{ const steps=Math.max(2,Math.round(2+(1-p)*30)); const q=255/(steps-1); for(let i=0;i<len;i+=4){ const r=Math.round(d[i]/q)*q; const g=Math.round(d[i+1]/q)*q; const b=Math.round(d[i+2]/q)*q; d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
-  { id:'cfb',   label:['color','trails'],     param:'decay',   run:(d,len,t,p)=>{ if(!cfbBuf||cfbBuf.length!==len){cfbBuf=new Uint8ClampedArray(len); for(let i=0;i<len;i++)cfbBuf[i]=d[i];} const decay=0.5+p*0.49; for(let i=0;i<len;i+=4){ cfbBuf[i]  =Math.round(cfbBuf[i]  *decay); cfbBuf[i+1]=Math.round(cfbBuf[i+1]*decay); cfbBuf[i+2]=Math.round(cfbBuf[i+2]*decay); cfbBuf[i+3]=255; if(d[i]>cfbBuf[i])   cfbBuf[i]  =d[i]; if(d[i+1]>cfbBuf[i+1])cfbBuf[i+1]=d[i+1]; if(d[i+2]>cfbBuf[i+2])cfbBuf[i+2]=d[i+2]; d[i]=lerp(d[i],cfbBuf[i],t); d[i+1]=lerp(d[i+1],cfbBuf[i+1],t); d[i+2]=lerp(d[i+2],cfbBuf[i+2],t); } }}
+  { id:'cfb',   label:['color','trails'],     param:'decay',   run:null } // stateful: handled in processColorModule
 ];
 
 function lerp(a,b,t){return Math.round(a+(b-a)*t);}
 
-function rgb2hsl(r,g,b){
+// allocation-free variants write into o (h in degrees); rgb2hsl/hsl2rgb keep their array-returning api
+function rgb2hslTo(r,g,b,o){
   r/=255;g/=255;b/=255;
   const max=Math.max(r,g,b),min=Math.min(r,g,b);
   let h,s,l=(max+min)/2;
@@ -3984,27 +4132,40 @@ function rgb2hsl(r,g,b){
     switch(max){case r:h=(g-b)/d+(g<b?6:0);break;case g:h=(b-r)/d+2;break;default:h=(r-g)/d+4;}
     h/=6;
   }
-  return[h*360,s,l];
+  o[0]=h*360;o[1]=s;o[2]=l;return o;
 }
-function hsl2rgb(h,s,l){
+function _hue2rgb(p,q,t){if(t<0)t+=1;if(t>1)t-=1;if(t<1/6)return p+(q-p)*6*t;if(t<1/2)return q;if(t<2/3)return p+(q-p)*(2/3-t)*6;return p;}
+function hsl2rgbTo(h,s,l,o){
   h/=360;
-  if(s===0){const v=Math.round(l*255);return[v,v,v];}
+  if(s===0){const v=Math.round(l*255);o[0]=o[1]=o[2]=v;return o;}
   const q=l<0.5?l*(1+s):l+s-l*s,p=2*l-q;
-  const hue2rgb=(p,q,t)=>{if(t<0)t+=1;if(t>1)t-=1;if(t<1/6)return p+(q-p)*6*t;if(t<1/2)return q;if(t<2/3)return p+(q-p)*(2/3-t)*6;return p;};
-  return[Math.round(hue2rgb(p,q,h+1/3)*255),Math.round(hue2rgb(p,q,h)*255),Math.round(hue2rgb(p,q,h-1/3)*255)];
+  o[0]=Math.round(_hue2rgb(p,q,h+1/3)*255);o[1]=Math.round(_hue2rgb(p,q,h)*255);o[2]=Math.round(_hue2rgb(p,q,h-1/3)*255);
+  return o;
 }
-function falseColor(t,p){
-  const palettes=[
-    [[0,0,128],[0,128,255],[0,255,128],[255,255,0],[255,0,0]],
-    [[0,0,0],[128,0,128],[255,0,255],[255,128,0],[255,255,255]],
-    [[0,64,0],[0,160,0],[128,255,0],[255,255,128],[255,255,255]],
-    [[20,20,20],[60,0,80],[180,0,120],[255,80,0],[255,220,100]]
-  ];
-  const pal=palettes[p%palettes.length];
+function rgb2hsl(r,g,b){return rgb2hslTo(r,g,b,[0,0,0]);}
+function hsl2rgb(h,s,l){return hsl2rgbTo(h,s,l,[0,0,0]);}
+// hue in degrees only (keyer), same math as rgb2hsl
+function _rgbHue(r,g,b){
+  const max=Math.max(r,g,b),min=Math.min(r,g,b);
+  if(max===min) return 0;
+  const d=max-min;let h;
+  if(max===r)h=(g-b)/d+(g<b?6:0);else if(max===g)h=(b-r)/d+2;else h=(r-g)/d+4;
+  return h*60;
+}
+const _FC_PAL=[
+  [[0,0,128],[0,128,255],[0,255,128],[255,255,0],[255,0,0]],
+  [[0,0,0],[128,0,128],[255,0,255],[255,128,0],[255,255,255]],
+  [[0,64,0],[0,160,0],[128,255,0],[255,255,128],[255,255,255]],
+  [[20,20,20],[60,0,80],[180,0,120],[255,80,0],[255,220,100]]
+];
+function falseColorTo(t,p,o){
+  const pal=_FC_PAL[p%_FC_PAL.length];
   const s=t*(pal.length-1),i=Math.floor(s),f=s-i;
   const a=pal[Math.min(i,pal.length-1)],b=pal[Math.min(i+1,pal.length-1)];
-  return[Math.round(a[0]+(b[0]-a[0])*f),Math.round(a[1]+(b[1]-a[1])*f),Math.round(a[2]+(b[2]-a[2])*f)];
+  o[0]=Math.round(a[0]+(b[0]-a[0])*f);o[1]=Math.round(a[1]+(b[1]-a[1])*f);o[2]=Math.round(a[2]+(b[2]-a[2])*f);
+  return o;
 }
+function falseColor(t,p){return falseColorTo(t,p,[0,0,0]);}
 function applyLut(r,g,b,preset){
   if(preset===0){return[255-r,255-g,255-b];}
   if(preset===1){const l=(r*0.299+g*0.587+b*0.114);return[Math.min(255,l*1.2),Math.min(255,l*0.9),Math.min(255,l*0.6)];}
@@ -4013,48 +4174,47 @@ function applyLut(r,g,b,preset){
 
 function processColorModule(mod, srcCanvas){
   const fx=COLOR_FX[mod.activeFx];
-  if(!fx||mod.intensity===0){
-    if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
-    mod.offCtx.drawImage(srcCanvas,0,0,W,H);
-    return mod.offscreen;
-  }
-  // GL paths
-  const GL_MAP={hue:'hue',sat:'sat',false:'false_color',pal:'palette',chan:'channel',duo:'duo',lut:'lut'};
-  if(GL_MAP[fx.id] && GLProcessor.ready()){
-    const extra=(fx.id==='false')?null:null;
-    const r=GLProcessor.run(GL_MAP[fx.id],mod,srcCanvas,extra);
+  const cg=mod.channelGain,gain=!!cg&&((cg.r??1)!==1||(cg.g??1)!==1||(cg.b??1)!==1);
+  if((!fx||mod.intensity===0)&&!gain) return srcCanvas; // pass-through (was a full copy)
+  // GL paths (gain applied in-shader via u_gain)
+  const GL_MAP={hue:'hue',sat:'sat',false:'false_color',pal:'palette',chan:'channel',duo:'duo',lut:'lut',cfb:'cfb'};
+  if(GLProcessor.ready()){
+    const r=GLProcessor.run((!fx||mod.intensity===0)?'cgain':GL_MAP[fx.id],mod,srcCanvas);
     if(r) return r;
   }
-  // CPU fallback (cfb + GL failure)
+  // CPU fallback
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
+  mod.offCtx.clearRect(0,0,W,H);
   mod.offCtx.drawImage(srcCanvas,0,0,W,H);
   const imgData=mod.offCtx.getImageData(0,0,W,H);
-  if(fx.id==='cfb'){
+  if(!fx||mod.intensity===0){
+    // gain only
+  } else if(fx.id==='cfb'){
     // color trails — uses per-module persistent buffer instead of shared singleton
     const d=imgData.data, len=d.length;
     if(!mod._cfbBuf||mod._cfbBuf.length!==len){mod._cfbBuf=new Uint8ClampedArray(len);for(let i=0;i<len;i++)mod._cfbBuf[i]=d[i];}
-    const decay=0.5+mod.param*0.49;
+    const decay=0.5+mod.param*0.49,b=mod._cfbBuf,t=mod.intensity;
     for(let i=0;i<len;i+=4){
-      mod._cfbBuf[i]  =Math.round(mod._cfbBuf[i]  *decay);
-      mod._cfbBuf[i+1]=Math.round(mod._cfbBuf[i+1]*decay);
-      mod._cfbBuf[i+2]=Math.round(mod._cfbBuf[i+2]*decay);
-      mod._cfbBuf[i+3]=255;
-      if(d[i]  >mod._cfbBuf[i])   mod._cfbBuf[i]  =d[i];
-      if(d[i+1]>mod._cfbBuf[i+1]) mod._cfbBuf[i+1]=d[i+1];
-      if(d[i+2]>mod._cfbBuf[i+2]) mod._cfbBuf[i+2]=d[i+2];
-      d[i]  =Math.round(d[i]  +(mod._cfbBuf[i]  -d[i]  )*mod.intensity);
-      d[i+1]=Math.round(d[i+1]+(mod._cfbBuf[i+1]-d[i+1])*mod.intensity);
-      d[i+2]=Math.round(d[i+2]+(mod._cfbBuf[i+2]-d[i+2])*mod.intensity);
+      b[i]  =Math.round(b[i]  *decay);
+      b[i+1]=Math.round(b[i+1]*decay);
+      b[i+2]=Math.round(b[i+2]*decay);
+      b[i+3]=255;
+      if(d[i]  >b[i])   b[i]  =d[i];
+      if(d[i+1]>b[i+1]) b[i+1]=d[i+1];
+      if(d[i+2]>b[i+2]) b[i+2]=d[i+2];
+      d[i]  =Math.round(d[i]  +(b[i]  -d[i]  )*t);
+      d[i+1]=Math.round(d[i+1]+(b[i+1]-d[i+1])*t);
+      d[i+2]=Math.round(d[i+2]+(b[i+2]-d[i+2])*t);
     }
   } else {
     fx.run(imgData.data,imgData.data.length,mod.intensity,mod.param);
   }
-  if(mod.channelGain){
-    const d=imgData.data,cg=mod.channelGain;
+  if(gain){
+    const d=imgData.data,gr=cg.r??1,gg=cg.g??1,gb=cg.b??1;
     for(let i=0;i<d.length;i+=4){
-      d[i]=Math.min(255,d[i]*(cg.r??1));
-      d[i+1]=Math.min(255,d[i+1]*(cg.g??1));
-      d[i+2]=Math.min(255,d[i+2]*(cg.b??1));
+      d[i]=Math.min(255,d[i]*gr);
+      d[i+1]=Math.min(255,d[i+1]*gg);
+      d[i+2]=Math.min(255,d[i+2]*gb);
     }
   }
   mod.offCtx.putImageData(imgData,0,0);
@@ -4485,84 +4645,110 @@ function processPixelOpsModule(mod,srcCanvas){
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const fx=PIXELOPS_FX[mod.activeFx];
   if(!fx) return mod.offscreen||srcCanvas;
-  // GL paths
+  // GL paths (all modes)
   if(GLProcessor.ready()){
-    const GL_PO={edge:'po_edge',emboss:'po_emboss',posterize:'po_posterize',threshold:'po_threshold',bloom:'po_bloom',aberration:'po_aberration'};
+    const GL_PO={edge:'po_edge',emboss:'po_emboss',posterize:'po_posterize',threshold:'po_threshold',bloom:'po_bloom',aberration:'po_aberration',erode:'po_erode',dilate:'po_dilate'};
     if(GL_PO[fx.id]){
       const r=GLProcessor.run(GL_PO[fx.id],mod,srcCanvas);
       if(r) return r;
     }
   }
-  // CPU fallback for erode/dilate and GL failures
+  // CPU fallback (no webgl / gl failure)
   if(_shouldSkipHeavy(mod)) return mod._lastResult;
+  mod.offCtx.clearRect(0,0,W,H);
   mod.offCtx.drawImage(srcCanvas,0,0,W,H);
-  if(!fx) return mod.offscreen||srcCanvas;
   const imgData=mod.offCtx.getImageData(0,0,W,H);
-  const d=imgData.data,t=mod.intensity,p=mod.param;
+  const d=imgData.data,t=mod.intensity,p=mod.param,len=d.length;
+  // scratch buffers reused across frames (were allocated per frame)
+  if(!mod._poTmp||mod._poTmp.length!==len){mod._poTmp=new Uint8ClampedArray(len);mod._poSum=null;}
+  const tmp=mod._poTmp,W4=W*4;
   switch(fx.id){
     case 'edge':{
-      const out=new Uint8ClampedArray(d.length);
+      tmp.set(d); // border keeps the source (was left transparent)
       for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){
         const i=(y*W+x)*4;
-        const gx=d[(y*W+x+1)*4]-d[(y*W+x-1)*4];
-        const gy=d[((y+1)*W+x)*4]-d[((y-1)*W+x)*4];
+        const gx=d[i+4]-d[i-4];
+        const gy=d[i+W4]-d[i-W4];
         const v=Math.min(255,Math.abs(gx)+Math.abs(gy))*p*2;
-        out[i]=lerp(d[i],v,t);out[i+1]=lerp(d[i+1],v,t);out[i+2]=lerp(d[i+2],v,t);out[i+3]=255;
+        tmp[i]=lerp(d[i],v,t);tmp[i+1]=lerp(d[i+1],v,t);tmp[i+2]=lerp(d[i+2],v,t);tmp[i+3]=255;
       }
-      imgData.data.set(out); break;}
+      d.set(tmp); break;}
     case 'emboss':{
-      const out=new Uint8ClampedArray(d.length);
+      tmp.set(d);
       for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){
-        const i=(y*W+x)*4,tl=(((y-1)*W+(x-1))*4),br=(((y+1)*W+(x+1))*4);
+        const i=(y*W+x)*4,tl=i-W4-4,br=i+W4+4;
         const v=Math.min(255,128+(d[tl]-d[br])*p*2);
-        out[i]=lerp(d[i],v,t);out[i+1]=lerp(d[i+1],v,t);out[i+2]=lerp(d[i+2],v,t);out[i+3]=255;
+        tmp[i]=lerp(d[i],v,t);tmp[i+1]=lerp(d[i+1],v,t);tmp[i+2]=lerp(d[i+2],v,t);tmp[i+3]=255;
       }
-      imgData.data.set(out); break;}
+      d.set(tmp); break;}
     case 'posterize':{
       const levels=Math.max(2,Math.round(2+p*14)),q=255/(levels-1);
-      for(let i=0;i<d.length;i+=4){d[i]=lerp(d[i],Math.round(d[i]/q)*q,t);d[i+1]=lerp(d[i+1],Math.round(d[i+1]/q)*q,t);d[i+2]=lerp(d[i+2],Math.round(d[i+2]/q)*q,t);}
+      for(let i=0;i<len;i+=4){d[i]=lerp(d[i],Math.round(d[i]/q)*q,t);d[i+1]=lerp(d[i+1],Math.round(d[i+1]/q)*q,t);d[i+2]=lerp(d[i+2],Math.round(d[i+2]/q)*q,t);}
       break;}
     case 'threshold':{
       const thresh=p*255;
-      for(let i=0;i<d.length;i+=4){const l=d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114;const v=l>thresh?255:0;d[i]=lerp(d[i],v,t);d[i+1]=lerp(d[i+1],v,t);d[i+2]=lerp(d[i+2],v,t);}
+      for(let i=0;i<len;i+=4){const l=d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114;const v=l>thresh?255:0;d[i]=lerp(d[i],v,t);d[i+1]=lerp(d[i+1],v,t);d[i+2]=lerp(d[i+2],v,t);}
       break;}
     case 'aberration':{
+      // red from x+shift (scan left→right), blue from x-shift (scan right→left) so neither reads
+      // an already-shifted pixel (blue used to cascade through overwritten values)
       const shift=Math.round(p*20*t);
-      for(let i=0;i<d.length;i+=4){const x=(i/4)%W;const rx=Math.min(W-1,x+shift),lx=Math.max(0,x-shift);const y=Math.floor(i/4/W);d[i]=d[(y*W+rx)*4];d[i+2]=d[(y*W+lx)*4+2];}
+      if(shift) for(let y=0;y<H;y++){
+        const row=y*W4;
+        for(let x=0;x<W;x++) d[row+x*4]=d[row+Math.min(W-1,x+shift)*4];
+        for(let x=W-1;x>=0;x--) d[row+x*4+2]=d[row+Math.max(0,x-shift)*4+2];
+      }
       break;}
     case 'bloom':{
-      // simple bloom: add blurred bright areas
-      const out=new Uint8ClampedArray(d.length);const r=Math.max(1,Math.round(p*8));
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        let rr=0,gg=0,bb=0,c=0;
-        for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){
-          const nx=Math.max(0,Math.min(W-1,x+dx)),ny=Math.max(0,Math.min(H-1,y+dy));
-          const si=(ny*W+nx)*4;const l=d[si]*0.299+d[si+1]*0.587+d[si+2]*0.114;
-          if(l>180){rr+=d[si];gg+=d[si+1];bb+=d[si+2];c++;}
+      // add the mean of bright (l>180) pixels in a (2r+1)² clamped window; separable box sums with
+      // sliding windows (was O(r²) per pixel)
+      const r=Math.max(1,Math.round(p*8));
+      if(!mod._poSum||mod._poSum.length!==len){mod._poSum=new Int32Array(len);mod._poCol=new Int32Array(W4);}
+      const S=mod._poSum,C=mod._poCol,M=tmp; // M: bright mask/values (rgb,1) per pixel
+      for(let i=0;i<len;i+=4){const b=d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114>180;M[i]=b?d[i]:0;M[i+1]=b?d[i+1]:0;M[i+2]=b?d[i+2]:0;M[i+3]=b?1:0;}
+      for(let y=0;y<H;y++){
+        const row=y*W4;let sr=0,sg=0,sb=0,sc=0;
+        for(let dx=-r;dx<=r;dx++){const j=row+Math.max(0,Math.min(W-1,dx))*4;sr+=M[j];sg+=M[j+1];sb+=M[j+2];sc+=M[j+3];}
+        for(let x=0;x<W;x++){
+          const i=row+x*4;S[i]=sr;S[i+1]=sg;S[i+2]=sb;S[i+3]=sc;
+          const o=row+Math.max(0,x-r)*4,n=row+Math.min(W-1,x+r+1)*4;
+          sr+=M[n]-M[o];sg+=M[n+1]-M[o+1];sb+=M[n+2]-M[o+2];sc+=M[n+3]-M[o+3];
         }
-        const i=(y*W+x)*4;
-        out[i]=Math.min(255,d[i]+lerp(0,(c>0?rr/c:0)*0.5,t));
-        out[i+1]=Math.min(255,d[i+1]+lerp(0,(c>0?gg/c:0)*0.5,t));
-        out[i+2]=Math.min(255,d[i+2]+lerp(0,(c>0?bb/c:0)*0.5,t));
-        out[i+3]=255;
       }
-      imgData.data.set(out); break;}
-    case 'erode':{
-      const out=new Uint8ClampedArray(d.length);const r=Math.max(1,Math.round(p*4));
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        let mr=255,mg=255,mb=255;
-        for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){const nx=Math.max(0,Math.min(W-1,x+dx)),ny=Math.max(0,Math.min(H-1,y+dy));const si=(ny*W+nx)*4;mr=Math.min(mr,d[si]);mg=Math.min(mg,d[si+1]);mb=Math.min(mb,d[si+2]);}
-        const i=(y*W+x)*4;out[i]=lerp(d[i],mr,t);out[i+1]=lerp(d[i+1],mg,t);out[i+2]=lerp(d[i+2],mb,t);out[i+3]=255;
+      C.fill(0);
+      for(let dy=-r;dy<=r;dy++){const row=Math.max(0,Math.min(H-1,dy))*W4;for(let k=0;k<W4;k++)C[k]+=S[row+k];}
+      for(let y=0;y<H;y++){
+        const row=y*W4;
+        for(let x=0;x<W;x++){
+          const k=x*4,i=row+k,c=C[k+3];
+          if(c>0){d[i]=Math.min(255,d[i]+lerp(0,C[k]/c*0.5,t));d[i+1]=Math.min(255,d[i+1]+lerp(0,C[k+1]/c*0.5,t));d[i+2]=Math.min(255,d[i+2]+lerp(0,C[k+2]/c*0.5,t));}
+          d[i+3]=255;
+        }
+        const o=Math.max(0,y-r)*W4,n=Math.min(H-1,y+r+1)*W4;
+        for(let k=0;k<W4;k++)C[k]+=S[n+k]-S[o+k];
       }
-      imgData.data.set(out); break;}
+      break;}
+    case 'erode':
     case 'dilate':{
-      const out=new Uint8ClampedArray(d.length);const r=Math.max(1,Math.round(p*4));
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        let mr=0,mg=0,mb=0;
-        for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){const nx=Math.max(0,Math.min(W-1,x+dx)),ny=Math.max(0,Math.min(H-1,y+dy));const si=(ny*W+nx)*4;mr=Math.max(mr,d[si]);mg=Math.max(mg,d[si+1]);mb=Math.max(mb,d[si+2]);}
-        const i=(y*W+x)*4;out[i]=lerp(d[i],mr,t);out[i+1]=lerp(d[i+1],mg,t);out[i+2]=lerp(d[i+2],mb,t);out[i+3]=255;
+      // square min/max is separable: horizontal pass into tmp, vertical pass back into d
+      const r=Math.max(1,Math.round(p*4)),ero=fx.id==='erode';
+      for(let y=0;y<H;y++){
+        const row=y*W4;
+        for(let x=0;x<W;x++){
+          const x0=Math.max(0,x-r),x1=Math.min(W-1,x+r);let mr=d[row+x0*4],mg=d[row+x0*4+1],mb=d[row+x0*4+2];
+          for(let xx=x0+1;xx<=x1;xx++){const j=row+xx*4;if(ero){if(d[j]<mr)mr=d[j];if(d[j+1]<mg)mg=d[j+1];if(d[j+2]<mb)mb=d[j+2];}else{if(d[j]>mr)mr=d[j];if(d[j+1]>mg)mg=d[j+1];if(d[j+2]>mb)mb=d[j+2];}}
+          const i=row+x*4;tmp[i]=mr;tmp[i+1]=mg;tmp[i+2]=mb;
+        }
       }
-      imgData.data.set(out); break;}
+      for(let y=0;y<H;y++){
+        const y0=Math.max(0,y-r),y1=Math.min(H-1,y+r);
+        for(let x=0;x<W;x++){
+          const c=x*4;let j=y0*W4+c,mr=tmp[j],mg=tmp[j+1],mb=tmp[j+2];
+          for(let yy=y0+1;yy<=y1;yy++){j=yy*W4+c;if(ero){if(tmp[j]<mr)mr=tmp[j];if(tmp[j+1]<mg)mg=tmp[j+1];if(tmp[j+2]<mb)mb=tmp[j+2];}else{if(tmp[j]>mr)mr=tmp[j];if(tmp[j+1]>mg)mg=tmp[j+1];if(tmp[j+2]>mb)mb=tmp[j+2];}}
+          const i=y*W4+c;d[i]=lerp(d[i],mr,t);d[i+1]=lerp(d[i+1],mg,t);d[i+2]=lerp(d[i+2],mb,t);d[i+3]=255;
+        }
+      }
+      break;}
   }
   mod.offCtx.putImageData(imgData,0,0);
   mod._lastResult=mod.offscreen;
@@ -4979,12 +5165,13 @@ const KEYER_FX=[
 function processKeyerModule(mod,srcCanvas){
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const fx=KEYER_FX[mod.activeFx];
-  const hasB=!!getSourceCanvas('B');
+  // raw B, rendered once per frame by renderFrame (getSourceCanvas redraws the source: ~2.7ms for video)
+  const bCv=_frameSrcB!==undefined?_frameSrcB:getSourceCanvas('B');
+  const hasB=!!bCv;
   if(GLProcessor.ready()&&hasB&&fx){
-    const GL_KEY={luma_dark:'keyer_luma_dark',luma_bright:'keyer_luma_bright',chroma_green:'keyer_chroma_green',chroma_blue:'keyer_chroma_blue',luma_invert:'keyer_luma_invert'};
+    const GL_KEY={luma_dark:'keyer_luma_dark',luma_bright:'keyer_luma_bright',chroma_green:'keyer_chroma_green',chroma_blue:'keyer_chroma_blue',luma_invert:'keyer_luma_invert',chroma_custom:'keyer_chroma_custom',isolate:'keyer_isolate',contrast_key:'keyer_contrast'};
     if(GL_KEY[fx.id]){
-      const bCanvas=getSourceCanvas('B');
-      const r=GLProcessor.run(GL_KEY[fx.id],mod,srcCanvas,bCanvas);
+      const r=GLProcessor.run(GL_KEY[fx.id],mod,srcCanvas,bCv);
       if(r) return r;
     }
   }
@@ -5001,30 +5188,29 @@ function processKeyerModule(mod,srcCanvas){
     mod._tmpBCtx=mod._tmpB.getContext('2d',{willReadFrequently:true});
   }
   const tctx=mod._tmpBCtx;
-  const _cvB=getSourceCanvas('B')||cvMix;
+  const _cvB=bCv||cvMix;
   tctx.drawImage(_cvB,0,0,W,H);
   const bData=tctx.getImageData(0,0,W,H);
   const bd=bData.data;
-  const p=mod.param,t=mod.intensity;
+  const p=mod.param,t=mod.intensity,id=fx.id,ph=p*360,on=Math.round(255*t);
   // build alpha mask for B — where key condition is NOT met, B shows through
-  for(let i=0;i<bd.length;i+=4){
-    let alpha=255; // default: B fully visible
-    switch(fx.id){
-      case 'luma_dark':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;alpha=l<p?0:255;break;}
-      case 'luma_bright':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;alpha=l>p?0:255;break;}
-      case 'luma_invert':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;alpha=l>p?255:0;break;}
-      case 'chroma_green':{const g=bd[i+1]-(bd[i]+bd[i+2])/2;alpha=g>p*80?0:255;break;}
-      case 'chroma_blue':{const b2=bd[i+2]-(bd[i]+bd[i+1])/2;alpha=b2>p*80?0:255;break;}
-      case 'chroma_custom':{const[h]=rgb2hsl(bd[i],bd[i+1],bd[i+2]);const diff=Math.min(Math.abs(h-p*360),360-Math.abs(h-p*360));alpha=diff<40?0:255;break;}
-      case 'isolate':{const[h,s]=rgb2hsl(bd[i],bd[i+1],bd[i+2]);const diff=Math.min(Math.abs(h-p*360),360-Math.abs(h-p*360));alpha=diff<40?255:0;break;}
+  // (intensity = soft key edge: visible pixels get alpha round(255*t))
+  for(let i=0,x=0;i<bd.length;i+=4,x=(x+1===W?0:x+1)){
+    let vis=true; // default: B fully visible
+    switch(id){
+      case 'luma_dark':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;vis=!(l<p);break;}
+      case 'luma_bright':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;vis=!(l>p);break;}
+      case 'luma_invert':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;vis=l>p;break;}
+      case 'chroma_green':{const g=bd[i+1]-(bd[i]+bd[i+2])/2;vis=!(g>p*80);break;}
+      case 'chroma_blue':{const b2=bd[i+2]-(bd[i]+bd[i+1])/2;vis=!(b2>p*80);break;}
+      case 'chroma_custom':{const a=Math.abs(_rgbHue(bd[i]/255,bd[i+1]/255,bd[i+2]/255)-ph);vis=!(Math.min(a,360-a)<40);break;}
+      case 'isolate':{const a=Math.abs(_rgbHue(bd[i]/255,bd[i+1]/255,bd[i+2]/255)-ph);vis=Math.min(a,360-a)<40;break;}
       case 'contrast_key':{
-        const x=(i/4)%W,y2=Math.floor(i/4/W);
         const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114);
         const ln=x+1<W?(bd[i+4]*0.299+bd[i+5]*0.587+bd[i+6]*0.114):l;
-        alpha=Math.abs(l-ln)/255>p?255:0;break;}
+        vis=Math.abs(l-ln)/255>p;break;}
     }
-    // apply intensity as soft key edge
-    bd[i+3]=Math.round(alpha*t);
+    bd[i+3]=vis?on:0;
   }
   tctx.putImageData(bData,0,0);
   // composite keyed B over A background
@@ -7544,15 +7730,14 @@ document.addEventListener('click',e=>{
   document.addEventListener('mouseup',()=>dragging=false);
 })();
 
+// fps label is written once a second by _tickFpsCounter; element + context cached
+let _pipEl=null,_pipCtx=null;
 function updatePip(masterCanvas){
   if(!pipActive) return;
-  const cv=pipCv();
-  if(!cv) return;
-  if(cv.width!==pipW){cv.width=pipW;cv.height=pipH;}
-  const ctx=cv.getContext('2d');
-  ctx.drawImage(masterCanvas,0,0,pipW,pipH);
-  const lbl=document.getElementById('pip-fps-label');
-  if(lbl) lbl.textContent=(document.getElementById('fps-num')?.textContent||'--')+' fps';
+  if(!_pipEl||!_pipEl.isConnected){_pipEl=pipCv();_pipCtx=_pipEl?_pipEl.getContext('2d'):null;}
+  if(!_pipCtx) return;
+  if(_pipEl.width!==pipW||_pipEl.height!==pipH){_pipEl.width=pipW;_pipEl.height=pipH;}
+  _pipCtx.drawImage(masterCanvas,0,0,pipW,pipH);
 }
 
 function toggleFS(){
