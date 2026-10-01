@@ -5767,133 +5767,104 @@ function processRowShiftModule(mod,srcCanvas){
 }
 
 
+// pixel sort works on typed arrays: runs above/below the threshold are sorted by a 16-bit quantized key
+// (1/256 luma step) with a stable radix/insertion sort. column passes run on a transposed copy so every
+// run is contiguous. was ~410k {r,g,b} objects + comparator sorts per frame (13-100ms).
+function _psScratch(mod,L,N){
+  let ps=mod._ps;
+  if(!ps||ps.L<L||ps.key.length!==N) ps=mod._ps={L,key:new Float32Array(N),tr:null,px:new Int32Array(L),q:new Uint16Array(L),tq:new Uint16Array(L),tp:new Int32Array(L),cnt:new Uint32Array(514)};
+  return ps;
+}
+// sort key of a packed rgba pixel: 0 luma, 1 saturation, 2 hue (all 0..255)
+function _psKey(v,kind){
+  const r=v&255,g=(v>>>8)&255,b=(v>>>16)&255;
+  if(kind===0) return 0.299*r+0.587*g+0.114*b;
+  const max=r>g?(r>b?r:b):(g>b?g:b),min=r<g?(r<b?r:b):(g<b?g:b),dd=max-min;
+  if(kind===1) return max===0?0:dd/max*255;
+  if(dd===0) return 0;
+  const h=max===r?(g-b)/dd%6:max===g?(b-r)/dd+2:(r-g)/dd+4;
+  return ((h*60)+360)%360/360*255;
+}
+// dst[x*h+y]=src[y*w+x], in 16×16 tiles
+function _psTranspose(src,dst,w,h){
+  for(let y0=0;y0<h;y0+=16){const y1=Math.min(h,y0+16);
+    for(let x0=0;x0<w;x0+=16){const x1=Math.min(w,x0+16);
+      for(let y=y0;y<y1;y++){for(let x=x0,si=y*w+x0,di=x0*h+y;x<x1;x++,si++,di+=h)dst[di]=src[si];}}}
+}
+// stable sort of px[a,b) by q[a,b), ascending
+function _psSortRange(ps,a,b){
+  const q=ps.q,px=ps.px,n=b-a;
+  if(n<48){
+    for(let i=a+1;i<b;i++){const kq=q[i],kp=px[i];let j=i-1;while(j>=a&&q[j]>kq){q[j+1]=q[j];px[j+1]=px[j];j--;}q[j+1]=kq;px[j+1]=kp;}
+    return;
+  }
+  // lsd radix, both byte histograms in one pass; skip when already ordered or a byte is constant
+  const tq=ps.tq,tp=ps.tp,c=ps.cnt;
+  c.fill(0);
+  let sorted=true,prev=0;
+  for(let i=a;i<b;i++){const v=q[i];if(v<prev)sorted=false;prev=v;c[(v&255)+1]++;c[(v>>8)+258]++;}
+  if(sorted) return;
+  const lowOne=c[(q[a]&255)+1]===n,highOne=c[(q[a]>>8)+258]===n;
+  for(let i=1;i<257;i++){c[i]+=c[i-1];c[i+257]+=c[i+256];}
+  if(!lowOne&&!highOne){
+    for(let i=a;i<b;i++){const v=q[i],o=c[v&255]++;tq[o]=v;tp[o]=px[i];}
+    for(let i=0;i<n;i++){const v=tq[i],o=a+c[(v>>8)+257]++;q[o]=v;px[o]=tp[i];}
+  } else {
+    // one pass on the byte that varies, then copy back
+    if(highOne) for(let i=a;i<b;i++){const v=q[i],o=c[v&255]++;tq[o]=v;tp[o]=px[i];}
+    else for(let i=a;i<b;i++){const v=q[i],o=c[(v>>8)+257]++;tq[o]=v;tp[o]=px[i];}
+    for(let i=0;i<n;i++){q[a+i]=tq[i];px[a+i]=tp[i];}
+  }
+}
+// sort buf[o, o+len) in place by key
+function _psRun(ps,buf,key,o,len,desc){
+  const px=ps.px,q=ps.q;
+  for(let j=0;j<len;j++){px[j]=buf[o+j];let v=(key[o+j]*256)|0;if(v>65535)v=65535;q[j]=desc?65535-v:v;}
+  _psSortRange(ps,0,len);
+  for(let j=0;j<len;j++) buf[o+j]=px[j];
+}
+// every w-long row of buf: sort runs longer than minLen that are above (or, dark, below) thresh
+function _psRows(ps,buf,w,h,minLen,thresh,kind,dark,desc){
+  const key=ps.key;
+  for(let y=0;y<h;y++){
+    const o0=y*w; let s=-1;
+    for(let x=0;x<=w;x++){
+      let inSeg=false;
+      if(x<w){const kv=key[o0+x]=_psKey(buf[o0+x],kind);inSeg=dark?kv<thresh:kv>thresh;}
+      if(inSeg){if(s<0)s=x;}
+      else if(s>=0){if(x-s>minLen)_psRun(ps,buf,key,o0+s,x-s,desc);s=-1;}
+    }
+  }
+}
 function processPixelSortModule(mod,srcCanvas){
   if(_shouldSkipHeavy(mod)) return mod._lastResult;
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
   const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
-  const luma=(r,g,b)=>0.299*r+0.587*g+0.114*b;
-  const thresh=(1-p)*255; // left=no sort (high threshold), right=max sort (low threshold)
-
-  function sortSegments(pixels, keyFn, descending, minLen){
-    // find runs where keyFn(px) > thresh, sort them
-    let segStart=-1;
-    for(let i=0;i<=pixels.length;i++){
-      const inSeg=i<pixels.length&&keyFn(pixels[i])>thresh;
-      if(inSeg&&segStart===-1) segStart=i;
-      else if(!inSeg&&segStart!==-1){
-        const len=i-segStart;
-        if(len>minLen){
-          const seg=pixels.slice(segStart,i);
-          seg.sort((a,b2)=>descending?keyFn(b2)-keyFn(a):keyFn(a)-keyFn(b2));
-          for(let k=0;k<seg.length;k++) pixels[segStart+k]=seg[k];
-        }
-        segStart=-1;
-      }
-    }
-  }
-
-  function getRow(y){
-    const row=[];
-    for(let x=0;x<W;x++){
-      const i=(y*W+x)*4;
-      row.push({r:d[i],g:d[i+1],b:d[i+2]});
-    }
-    return row;
-  }
-  function setRow(y,row){
-    for(let x=0;x<W;x++){
-      const i=(y*W+x)*4;d[i]=row[x].r;d[i+1]=row[x].g;d[i+2]=row[x].b;
-    }
-  }
-  function getCol(x){
-    const col=[];
-    for(let y=0;y<H;y++){
-      const i=(y*W+x)*4;
-      col.push({r:d[i],g:d[i+1],b:d[i+2]});
-    }
-    return col;
-  }
-  function setCol(x,col){
-    for(let y=0;y<H;y++){
-      const i=(y*W+x)*4;d[i]=col[y].r;d[i+1]=col[y].g;d[i+2]=col[y].b;
-    }
-  }
-  function getHue(px){
-    const r=px.r/255,g=px.g/255,b=px.b/255;
-    const max=Math.max(r,g,b),min=Math.min(r,g,b),d=max-min;
-    if(d===0) return 0;
-    let h=max===r?(g-b)/d%6:max===g?(b-r)/d+2:(r-g)/d+4;
-    return ((h*60)+360)%360/360*255;
-  }
-  function getSat(px){
-    const r=px.r/255,g=px.g/255,b=px.b/255;
-    const max=Math.max(r,g,b),min=Math.min(r,g,b);
-    return max===0?0:(max-min)/max*255;
-  }
-
+  const d32=new Int32Array(d.buffer,d.byteOffset,d.length>>2); // rgba little-endian: r = low byte (int32: opaque pixels stay small ints)
+  const N=W*H,thresh=(1-p)*255; // left=no sort (high threshold), right=max sort (low threshold)
   const minSegLen=Math.max(2,Math.floor((1-t)*30));
+  const ps=_psScratch(mod,Math.max(W,H),N),key=ps.key;
+  // columns: transpose, sort as rows, transpose back
+  const cols=(minLen,desc)=>{
+    const tr=ps.tr&&ps.tr.length===N?ps.tr:(ps.tr=new Int32Array(N));
+    _psTranspose(d32,tr,W,H);
+    _psRows(ps,tr,H,W,minLen,thresh,0,false,desc);
+    _psTranspose(tr,d32,H,W);
+  };
 
-  if(fx===0){ // bright sort — horiz, sort bright segments light→dark
-    for(let y=0;y<H;y++){const row=getRow(y);sortSegments(row,px=>luma(px.r,px.g,px.b),false,minSegLen);setRow(y,row);}
-  } else if(fx===1){ // dark sort — horiz, sort dark segments (below thresh) dark→light
-    for(let y=0;y<H;y++){
-      const row=getRow(y);
-      // for dark sort: find segments BELOW threshold
-      let segStart=-1;
-      for(let i=0;i<=row.length;i++){
-        const inSeg=i<row.length&&luma(row[i].r,row[i].g,row[i].b)<thresh;
-        if(inSeg&&segStart===-1) segStart=i;
-        else if(!inSeg&&segStart!==-1){
-          const len=i-segStart;
-          if(len>minSegLen){
-            const seg=row.slice(segStart,i);
-            seg.sort((a,b2)=>luma(a.r,a.g,a.b)-luma(b2.r,b2.g,b2.b));
-            for(let k=0;k<seg.length;k++) row[segStart+k]=seg[k];
-          }
-          segStart=-1;
-        }
-      }
-      setRow(y,row);
-    }
-  } else if(fx===2){ // sat sort — sort by saturation
-    for(let y=0;y<H;y++){const row=getRow(y);sortSegments(row,getSat,true,minSegLen);setRow(y,row);}
-  } else if(fx===3){ // hue sort — sort by actual hue value
-    for(let y=0;y<H;y++){const row=getRow(y);sortSegments(row,getHue,false,minSegLen);setRow(y,row);}
-  } else if(fx===4){ // horizontal — sort entire rows (no threshold segmenting)
-    for(let y=0;y<H;y++){
-      if(Math.random()<t){
-        const row=getRow(y);
-        row.sort((a,b2)=>luma(a.r,a.g,a.b)-luma(b2.r,b2.g,b2.b));
-        setRow(y,row);
-      }
-    }
+  if(fx===4){ // horizontal — sort entire rows (no threshold segmenting)
+    for(let y=0;y<H;y++) if(Math.random()<t){const o0=y*W;for(let x=0;x<W;x++)key[o0+x]=_psKey(d32[o0+x],0);_psRun(ps,d32,key,o0,W,false);}
   } else if(fx===5){ // vertical — sort bright segments top→bottom
-    for(let x=0;x<W;x++){const col=getCol(x);sortSegments(col,px=>luma(px.r,px.g,px.b),false,minSegLen);setCol(x,col);}
+    cols(minSegLen,false);
   } else if(fx===6){ // droopy — columns sort descending (bright falls to bottom), drip effect
-    for(let x=0;x<W;x++){
-      const col=getCol(x);
-      // find bright segments and sort them dark→light (bright sinks to bottom)
-      let segStart=-1;
-      for(let i=0;i<=col.length;i++){
-        const inSeg=i<col.length&&luma(col[i].r,col[i].g,col[i].b)>thresh;
-        if(inSeg&&segStart===-1) segStart=i;
-        else if(!inSeg&&segStart!==-1){
-          const len=i-segStart;
-          if(len>minSegLen){
-            const seg=col.slice(segStart,i);
-            seg.sort((a,b2)=>luma(b2.r,b2.g,b2.b)-luma(a.r,a.g,a.b)); // bright sinks
-            for(let k=0;k<seg.length;k++) col[segStart+k]=seg[k];
-          }
-          segStart=-1;
-        }
-      }
-      setCol(x,col);
-    }
+    cols(minSegLen,true);
   } else if(fx===7){ // full sort — both horiz and vert in alternating passes
-    for(let y=0;y<H;y++){const row=getRow(y);sortSegments(row,px=>luma(px.r,px.g,px.b),false,minSegLen);setRow(y,row);}
-    for(let x=0;x<W;x++){const col=getCol(x);sortSegments(col,px=>luma(px.r,px.g,px.b),false,Math.floor(minSegLen*0.5));setCol(x,col);}
+    _psRows(ps,d32,W,H,minSegLen,thresh,0,false,false);
+    cols(Math.floor(minSegLen*0.5),false);
+  } else if(fx>=0&&fx<=3){ // bright / dark / saturation (most saturated first) / hue — horizontal runs
+    _psRows(ps,d32,W,H,minSegLen,thresh,fx===2?1:fx===3?2:0,fx===1,fx===2);
   }
 
   ctx.putImageData(imgData,0,0);
