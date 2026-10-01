@@ -4920,7 +4920,7 @@ function processKeyerModule(mod,srcCanvas){
   const fx=KEYER_FX[mod.activeFx];
   const hasB=!!getSourceCanvas('B');
   if(GLProcessor.ready()&&hasB&&fx){
-    const GL_KEY={luma_dark:'keyer_luma_dark',luma_bright:'keyer_luma_bright',chroma_green:'keyer_chroma_green',chroma_blue:'keyer_chroma_blue',luma_invert:'keyer_luma_invert'};
+    const GL_KEY={luma_dark:'keyer_luma_dark',luma_bright:'keyer_luma_bright',chroma_green:'keyer_chroma_green',chroma_blue:'keyer_chroma_blue',luma_invert:'keyer_luma_invert',chroma_custom:'keyer_chroma_custom',isolate:'keyer_isolate',contrast_key:'keyer_contrast'};
     if(GL_KEY[fx.id]){
       const bCanvas=getSourceCanvas('B');
       const r=GLProcessor.run(GL_KEY[fx.id],mod,srcCanvas,bCanvas);
@@ -4944,26 +4944,25 @@ function processKeyerModule(mod,srcCanvas){
   tctx.drawImage(_cvB,0,0,W,H);
   const bData=tctx.getImageData(0,0,W,H);
   const bd=bData.data;
-  const p=mod.param,t=mod.intensity;
+  const p=mod.param,t=mod.intensity,id=fx.id,ph=p*360,on=Math.round(255*t);
   // build alpha mask for B — where key condition is NOT met, B shows through
-  for(let i=0;i<bd.length;i+=4){
-    let alpha=255; // default: B fully visible
-    switch(fx.id){
-      case 'luma_dark':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;alpha=l<p?0:255;break;}
-      case 'luma_bright':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;alpha=l>p?0:255;break;}
-      case 'luma_invert':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;alpha=l>p?255:0;break;}
-      case 'chroma_green':{const g=bd[i+1]-(bd[i]+bd[i+2])/2;alpha=g>p*80?0:255;break;}
-      case 'chroma_blue':{const b2=bd[i+2]-(bd[i]+bd[i+1])/2;alpha=b2>p*80?0:255;break;}
-      case 'chroma_custom':{const[h]=rgb2hsl(bd[i],bd[i+1],bd[i+2]);const diff=Math.min(Math.abs(h-p*360),360-Math.abs(h-p*360));alpha=diff<40?0:255;break;}
-      case 'isolate':{const[h,s]=rgb2hsl(bd[i],bd[i+1],bd[i+2]);const diff=Math.min(Math.abs(h-p*360),360-Math.abs(h-p*360));alpha=diff<40?255:0;break;}
+  // (intensity = soft key edge: visible pixels get alpha round(255*t))
+  for(let i=0,x=0;i<bd.length;i+=4,x=(x+1===W?0:x+1)){
+    let vis=true; // default: B fully visible
+    switch(id){
+      case 'luma_dark':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;vis=!(l<p);break;}
+      case 'luma_bright':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;vis=!(l>p);break;}
+      case 'luma_invert':{const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114)/255;vis=l>p;break;}
+      case 'chroma_green':{const g=bd[i+1]-(bd[i]+bd[i+2])/2;vis=!(g>p*80);break;}
+      case 'chroma_blue':{const b2=bd[i+2]-(bd[i]+bd[i+1])/2;vis=!(b2>p*80);break;}
+      case 'chroma_custom':{const a=Math.abs(_rgbHue(bd[i]/255,bd[i+1]/255,bd[i+2]/255)-ph);vis=!(Math.min(a,360-a)<40);break;}
+      case 'isolate':{const a=Math.abs(_rgbHue(bd[i]/255,bd[i+1]/255,bd[i+2]/255)-ph);vis=Math.min(a,360-a)<40;break;}
       case 'contrast_key':{
-        const x=(i/4)%W,y2=Math.floor(i/4/W);
         const l=(bd[i]*0.299+bd[i+1]*0.587+bd[i+2]*0.114);
         const ln=x+1<W?(bd[i+4]*0.299+bd[i+5]*0.587+bd[i+6]*0.114):l;
-        alpha=Math.abs(l-ln)/255>p?255:0;break;}
+        vis=Math.abs(l-ln)/255>p;break;}
     }
-    // apply intensity as soft key edge
-    bd[i+3]=Math.round(alpha*t);
+    bd[i+3]=vis?on:0;
   }
   tctx.putImageData(bData,0,0);
   // composite keyed B over A background
