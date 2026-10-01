@@ -1314,7 +1314,13 @@ body.dark .bypass-btn.off{background:var(--ink)!important;color:var(--paper);bor
 body.dark .bypass-btn.off rect{fill:var(--paper);}
 
 /* ── TUTORIAL ── card is ink-faced: .inverse flips the tokens inside it (and back in dark) */
-#tut-card{position:fixed;top:0;left:50%;transform:translateX(-50%);width:340px;background:var(--paper);border:2px solid var(--ink);border-top:none;z-index:9000;display:none;box-shadow:4px 4px 0 var(--ink);zoom:1.5;}
+#tut-card{position:fixed;top:0;left:50%;transform:translateX(-50%);width:340px;background:var(--paper);border:2px solid var(--ink);z-index:9000;display:none;box-shadow:4px 4px 0 var(--ink);zoom:1.5;}
+/* spotlight: dims everything except the step's focus rects. sits under the card
+   and every popup/dropdown (99000+), never takes clicks */
+#tut-dim{position:fixed;inset:0;z-index:8950;pointer-events:none;display:none;}
+#tut-dim svg{display:block;width:100%;height:100%;}
+#tut-dim path{fill:rgba(0,0,0,0.62);fill-rule:evenodd;}
+#tut-dim rect{fill:none;stroke:var(--ink);stroke-width:2;}
 /* tab row sits above the card border */
 #tut-card .tc-tabs{display:flex;align-items:flex-end;gap:0;padding:0 4px;background:var(--paper);background-image:var(--stripes-h);background-repeat:repeat;position:relative;z-index:1;border-bottom:2px solid var(--ink);}
 #tut-card .tc-tab{
@@ -1731,7 +1737,7 @@ body.crt .app{
       <div class="src-tag">A</div>
     </div>
     <div id="left-swap-row" style="display:none;align-items:center;justify-content:center;padding:2px 0;">
-      <button class="tbtn" onclick="swapSources()">A↔B</button>
+      <button class="tbtn" onclick="swapSources()" data-tip="swap">A↔B</button>
     </div>
     <div class="src-slot" id="slotB" style="display:none;">
       <div class="src-bar"></div>
@@ -1752,12 +1758,10 @@ body.crt .app{
     </div>
     <div class="helper-body">
       <div class="helper-tip" id="helper-tip">
-        <span class="tip-line"><b>Load sources</b> — click <b>add</b> on a source node, or click a source type in the right panel.</span>
-        <span class="tip-line"><b>Add modules</b> — click any module in the right panel to add it to the chain.</span>
-        <span class="tip-line"><b>Crossfade</b> — drag the slider in the mixer to blend A and B.</span>
-        <span class="tip-line"><b>Bypass</b> — click the eye on the module header to toggle bypass on/off.</span>
-        <span class="tip-line"><b>Reorder</b> — drag the ⠿ handle to rearrange modules.</span>
-        <span class="tip-line"><b>Output</b> — click output window, move it to your second screen, press F to fullscreen.</span>
+        <span class="tip-line">Hover anything to see what it does here. Click it to pin the tip.</span>
+        <span class="tip-line"><b>inputs</b> — click <b>add</b> on input A or B, then pick a source type on the left.</span>
+        <span class="tip-line"><b>effects</b> — click an effect on the right to add it below the mixer. Drag ⠿ to reorder, click the eye to bypass.</span>
+        <span class="tip-line"><b>output</b> — open the output window, move it to the second screen, press F in it to go fullscreen.</span>
       </div>
     </div>
   </div>
@@ -1772,7 +1776,7 @@ body.crt .app{
     <!-- source row: 150% of chain-col width -->
     <div id="source-nodes" style="display:flex;flex-direction:row;gap:8px;align-items:flex-start;flex-shrink:0;padding-top:14px;width:100%;max-width:560px;">
       <!-- source A node -->
-      <div class="node src-node" id="src-node-a" style="flex:1;min-width:0;display:flex;flex-direction:column;">
+      <div class="node src-node" id="src-node-a" data-tip="srcnode" style="flex:1;min-width:0;display:flex;flex-direction:column;">
         <div class="node-bar"></div>
         <div class="node-head" style="cursor:pointer;" onclick="toggleNodeCollapse('a')">
           <div class="node-dot"></div>
@@ -1785,7 +1789,7 @@ body.crt .app{
         </div>
       </div>
       <!-- source B node -->
-      <div class="node src-node" id="src-node-b" style="flex:1;min-width:0;display:flex;flex-direction:column;">
+      <div class="node src-node" id="src-node-b" data-tip="srcnode" style="flex:1;min-width:0;display:flex;flex-direction:column;">
         <div class="node-bar"></div>
         <div class="node-head" style="cursor:pointer;" onclick="toggleNodeCollapse('b')">
           <div class="node-dot"></div>
@@ -1810,7 +1814,7 @@ body.crt .app{
     <div class="chain-col" id="chain-col">
 
       <div class="conn"></div>
-      <div class="node mixer-node">
+      <div class="node mixer-node" data-tip="mixer">
         <div class="node-bar"></div>
         <div class="node-head" style="cursor:pointer;" onclick="toggleNodeCollapse('mixer')">
           <div class="node-dot" style="background:var(--ink);"></div>
@@ -1837,7 +1841,7 @@ body.crt .app{
 
       <div class="conn" id="pre-master-conn"></div>
 
-      <div class="master-node">
+      <div class="master-node" data-tip="masterpreview">
         <div class="node-bar"></div>
         <div class="master-head">
           <span class="master-title">master output</span>
@@ -1858,24 +1862,24 @@ body.crt .app{
     <button type="button" class="mitem" onclick="addModule('keyer','processor','#f97316')"><span class="mitem-icon">⬡</span><span class="mitem-name">keyer</span></button>
     <button type="button" class="mitem" onclick="addModule('color','processor','#f97316')"><span class="mitem-icon">◑</span><span class="mitem-name">color</span></button>
     <button type="button" class="mitem" onclick="addModule('geometry','processor','#f97316')"><span class="mitem-icon">◻</span><span class="mitem-name">geometry</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('feedback','processor','#f97316')"><span class="mitem-icon">∞</span><span class="mitem-name">feedback</span><span class="mitem-heavy-badge">heavy</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('pixelops','processor','#f97316')"><span class="mitem-icon">▦</span><span class="mitem-name">pixel operations</span><span class="mitem-heavy-badge">heavy</span></button>
+    <button type="button" class="mitem" onclick="addModule('feedback','processor','#f97316')"><span class="mitem-icon">∞</span><span class="mitem-name">feedback</span></button>
+    <button type="button" class="mitem" onclick="addModule('pixelops','processor','#f97316')"><span class="mitem-icon">▦</span><span class="mitem-name">pixel operations</span></button>
     <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('ascii','processor','#f97316')"><span class="mitem-icon">⌨</span><span class="mitem-name">ascii</span><span class="mitem-heavy-badge">heavy</span></button>
-    <div class="sec-lbl" data-tip="glitch">glitch</div>
+    <div class="sec-lbl" id="glitch-sec-lbl" data-tip="glitch">glitch</div>
     <button type="button" class="mitem" onclick="addModule('vhs','glitch','#e11d48')"><span class="mitem-icon">▷</span><span class="mitem-name">VHS</span></button>
-    <button type="button" class="mitem" onclick="addModule('signalnoise','glitch','#e11d48')"><span class="mitem-icon">⣿</span><span class="mitem-name">signal noise</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('signalnoise','glitch','#e11d48')"><span class="mitem-icon">⣿</span><span class="mitem-name">signal noise</span><span class="mitem-heavy-badge">heavy</span></button>
     <button type="button" class="mitem" onclick="addModule('rowshift','glitch','#e11d48')"><span class="mitem-icon">≡</span><span class="mitem-name">row shift</span></button>
     <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('datamosh','glitch','#e11d48')"><span class="mitem-icon">◧</span><span class="mitem-name">datamosh</span><span class="mitem-heavy-badge">heavy</span></button>
     <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('blockcorrupt','glitch','#e11d48')"><span class="mitem-icon">▩</span><span class="mitem-name">block corrupt</span><span class="mitem-heavy-badge">heavy</span></button>
     <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('pixelsort','glitch','#e11d48')"><span class="mitem-icon">↕</span><span class="mitem-name">pixel sort</span><span class="mitem-heavy-badge">heavy</span></button>
-    <div class="sec-lbl" data-tip="modulators">modulators</div>
-    <button type="button" class="mitem" id="si-oscillator" onclick="addModule('LFO','modulator','#000')"><span class="mitem-icon">◎</span><span class="mitem-name">oscillator</span></button>
-    <button type="button" class="mitem" onclick="addModule('envelope','modulator','#000')" style="display:none;"><span class="mitem-icon">◬</span><span class="mitem-name">envelope</span></button>
-    <button type="button" class="mitem" onclick="addModule('xypad','modulator','#000')"><span class="mitem-icon">⊕</span><span class="mitem-name">XY pad</span></button>
-    <button type="button" class="mitem" onclick="addModule('randwalk','modulator','#000')"><span class="mitem-icon">⟿</span><span class="mitem-name">random walk</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('sequencer','modulator','#000')"><span class="mitem-icon">▤</span><span class="mitem-name">sequencer</span><span class="mitem-heavy-badge">heavy</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('audio','modulator','#000')"><span class="mitem-icon">♪</span><span class="mitem-name">audio</span><span class="mitem-heavy-badge">heavy</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('perlin','modulator','#000')"><span class="mitem-icon">〜</span><span class="mitem-name">perlin noise</span><span class="mitem-heavy-badge">heavy</span></button>
+    <div class="sec-lbl" id="mod-sec-lbl" data-tip="modulators">modulators</div>
+    <button type="button" class="mitem" id="si-oscillator" data-mod="1" onclick="addModule('LFO','modulator','#000')"><span class="mitem-icon">◎</span><span class="mitem-name">oscillator</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('envelope','modulator','#000')" style="display:none;"><span class="mitem-icon">◬</span><span class="mitem-name">envelope</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('xypad','modulator','#000')"><span class="mitem-icon">⊕</span><span class="mitem-name">XY pad</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('randwalk','modulator','#000')"><span class="mitem-icon">⟿</span><span class="mitem-name">random walk</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('sequencer','modulator','#000')"><span class="mitem-icon">▤</span><span class="mitem-name">sequencer</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('audio','modulator','#000')"><span class="mitem-icon">♪</span><span class="mitem-name">audio</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('perlin','modulator','#000')"><span class="mitem-icon">〜</span><span class="mitem-name">perlin noise</span></button>
   </div>
 </aside>
 
@@ -1930,7 +1934,7 @@ body.crt .app{
       <div class="boot-title" id="boot-title">m-or.ph</div>
       <div class="boot-sub">modular object rendering &amp; processing hub</div>
       <div class="boot-body">
-        <p>m-or.ph is a web-based AV tool for live on-the-go performance.<br>Made for VJs, experimental artists, in-house party visual guys,<br>or that guy who borrowed their friend's laptop 10 minutes before the show. One file. One browser. Any screen. Any machine.</p>
+        <p>m-or.ph is a web-based AV tool for live on-the-go performance. Made for VJs, experimental artists, in-house party visual guys, or that guy who borrowed their friend's laptop 10 minutes before the show. One file. One browser. Any screen. Any machine.</p>
       </div>
       <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding-top:24px;gap:0;">
         <button class="boot-btn boot-btn-main" type="button" onclick="launchSequence();return false;">INITIALIZE</button>
@@ -3783,337 +3787,424 @@ setTimeout(updateSourceLayout,100);
 setTimeout(_updateConnectorLines,150);
 
 const TIPS={
-  idle:{icon:'◈',title:'getting started',tips:['<b>Load inputs</b> — click <b>add</b> on an input node, or pick a source type in the left panel.','<b>Add effects</b> — click any effect in the right panel to add it to the chain.','<b>Crossfade</b> — drag the mixer slider to blend A and B.','<b>Bypass</b> — click the eye on the effect header to toggle it on and off.','<b>Reorder</b> — drag the ⠿ handle to rearrange effects.','<b>Output</b> — open output window, move to second screen, press F to fullscreen.']},
-  color:{icon:'◑',title:'color',tips:['<b>Hue rotate</b> — shifts all colors around the wheel. Param = rotation amount.','<b>Saturation</b> — left = grayscale, right = fully saturated.','<b>False color</b> — maps brightness to a color palette. Param = palette style.','<b>Palette reduce</b> — quantizes colors. Right = heavy posterization.','<b>Channel remap</b> — swaps or inverts R/G/B channels.','<b>Duotone</b> — maps image to a single hue. Param = which hue.','<b>LUT</b> — applies a color grade preset. Param sweeps invert / warm / cool.','<b>Color trails</b> — bright pixels persist and decay. Param = trail length.']},
-  datamosh:{icon:'◧',title:'datamosh',tips:['One effect active at a time — click to select, click again to deactivate.','<b>Flow smear</b> — real datamosh. Accumulates motion vectors and warps a frozen buffer. Param = how long the mosh holds.','<b>I-frame drop</b> — freezes a keyframe and holds it while the video keeps moving underneath. Param = freeze duration.','<b>Ava/lanche</b> — pixels drip downward toward darker neighbors. Param = how sticky the trail is.','<b>Warp wave</b> — sine wave pixel displacement. Param = frequency of the wave.','<b>Pixel frame</b> — applies wrong motion vectors to 16×16 blocks from a previous frame. Param = how far off the vectors are.','<b>Delta blend</b> — shows only what changed between frames, amplified and color-shifted. Still = gray. Motion = color.','<b>Bit crush</b> — quantizes color bit depth. Slide right for extreme 1-bit posterization.','<b>Displace</b> — uses luma as a displacement map, warping bright areas. Param = warp scale.']},
-  vhs:{icon:'▷',title:'VHS',tips:['Simulates analog tape degradation. Each mode targets a different artifact.','<b>Tracking</b> — horizontal tears from bad tape tracking. Intensity = how severe, param = how many tears per frame.','<b>Color bleed</b> — red channel bleeds right, blue bleeds left, like worn tape dye separation.','<b>Luma wobble</b> — brightness pulses across scan lines using a sine wave. Param = wobble amount.','<b>Tape crinkle</b> — combines horizontal warping and compression, like physically creased tape.','<b>Chroma shift</b> — R and B channels offset in opposite horizontal directions. Param = shift distance.','<b>Static burst</b> — random white and black noise pixels. Param = density of the static.','<b>Head switch</b> — bottom strip of the frame flickers and shifts, simulating the VHS head switching artifact.','<b>Full VHS</b> — all modes active simultaneously at reduced intensity.']},
-  blockcorrupt:{icon:'▩',title:'block corrupt',tips:['Corrupts the frame by swapping, replacing, or freezing rectangular pixel blocks.','<b>DCT block</b> — swaps 8×8 pixel blocks between random positions. Classic JPEG/codec artifact look.','<b>Tile swap</b> — larger block swaps. Param controls tile size from 16px to 64px.','<b>Color block</b> — fills random blocks with solid random colors. More extreme and graphic.','<b>Freeze block</b> — captures blocks and holds them frozen for several frames before releasing.','<b>Stream corrupt</b> — shifts horizontal bands of pixels left or right, like a corrupted data stream.','<b>Macro block</b> — quantizes large color regions like over-compressed MPEG. Param = block size.','<b>Ghost block</b> — semi-transparent block overlay from elsewhere in frame. Ghosting effect.','<b>Full corrupt</b> — DCT + stream + macro combined. Param and intensity control overall severity.']},
-  rowshift:{icon:'≡',title:'row shift',tips:['Displaces horizontal scan lines independently for CRT and sync-loss effects.','<b>Scan drift</b> — subtle persistent per-row offset. Rows slowly wander and drift. Most subtle mode.','<b>Tear line</b> — sharp, sparse tears. 1–4 rows shift hard and randomly each frame.','<b>Sync loss</b> — large bands of the frame shift together, like a monitor losing horizontal sync.','<b>Interlace</b> — even rows shift right, odd rows shift left. Fixed offset. Param = shift distance.','<b>Field flip</b> — pairs of rows swap vertically, simulating interlace field errors.','<b>Scan line</b> — random row duplication with small shifts, moved here from datamosh.','<b>Jitter</b> — high-frequency per-row jitter every frame. Param = how many rows jitter.','<b>Full shift</b> — wave drift + scan drift + tear lines all combined.','Try assigning an LFO to intensity for rhythmic sync-loss pulses.']},
-  pixelsort:{icon:'↕',title:'pixel sort',tips:['Sorts pixels by a brightness or color key within detected segments of the image.','<b>Param = sort amount</b> — left is no sort, right is maximum sort (low threshold = more pixels qualify).','<b>Brightness</b> — sorts bright horizontal segments light to dark. Classic glitch art look.','<b>Dark</b> — sorts dark horizontal segments dark to light. Opposite areas affected.','<b>Hue</b> — sorts segments by actual hue value. Creates rainbow banding in colored areas.','<b>Saturation</b> — sorts segments by color saturation from gray to vivid.','<b>Horizontal</b> — sorts entire rows with no threshold segmenting. Full row streaks.','<b>Vertical</b> — segmented column sort, streaks flow downward through bright areas.','<b>Droopy</b> — bright pixels sink to the bottom of each column. Gravity drip effect.','<b>Full sort</b> — horizontal and vertical passes combined in sequence.']},
-  signalnoise:{icon:'⣿',title:'signal noise',tips:['Adds noise to individual color channels independently for different visual textures.','<b>RGB noise</b> — each channel (R, G, B) gets its own random offset. Colorful, active noise.','<b>Luma noise</b> — all channels shift by the same amount. Classic analog film grain.','<b>Chroma noise</b> — only red and blue shift. Green stays stable. Color-fringing look.','<b>Quantize</b> — posterizes color to a reduced number of steps. Param = how many levels.','<b>Salt & pepper</b> — random pixels snap hard to black or white. Like damaged sensor pixels.','<b>Hue drift</b> — per-pixel random hue rotation in HSV space. Colors shift and swirl.','<b>Bit flip</b> — randomly flips individual bits in pixel values. Very sparse but striking.','<b>Full noise</b> — RGB noise + salt & pepper combined at full intensity.','Keep intensity low for subtle grain. High intensity for full signal breakdown.']},
-  LFO:{icon:'◎',title:'oscillator',tips:[
-    '<b>Oscillator</b> — automatically moves any knob up and down over time.',
-    '<b>Pick a shape</b> — sine is smooth, square snaps between values, saw ramps up, burst fires in pulses.',
-    '<b>Rate</b> — how fast the LFO oscillates. Left = very slow, right = fast.',
-    '<b>Depth</b> — how much the target knob moves. Left = subtle, right = full range.',
-    '<b>Send to →</b> — pick any knob from any effect in your chain, then hit assign.',
-    'Once assigned the button turns green. The target knob animates in real time.',
-    'You can run <b>multiple LFOs</b> at once, each targeting a different knob.',
-    'Try: oscillator on sine → MIXER crossfade for an auto-blend between sources.'
+  // ── default ──
+  idle:{icon:'◈',title:'getting started',tips:[
+    'Hover anything to see what it does here. Click it to pin the tip.',
+    '<b>inputs</b> — click <b>add</b> on input A or B, then pick a source type on the left.',
+    '<b>effects</b> — click an effect on the right to add it below the mixer. Drag ⠿ to reorder, click the eye to bypass.',
+    '<b>output</b> — open the output window, move it to the second screen, press F in it to go fullscreen.'
   ]},
-  feedback:{icon:'∞',title:'feedback',tips:[
-    '<b>Feedback</b> — routes the output back into itself, creating looping visual echoes.',
-    '<b>Echo decay</b> — simple trail. Previous frame fades and blends with current.',
-    '<b>Zoom pulse</b> — each feedback frame zooms slightly inward, creating a tunnel effect.',
-    '<b>Rotation drift</b> — feedback rotates each frame. Param controls speed and direction.',
-    '<b>Edge bleed</b> — feedback shifts position slightly, making edges smear outward.',
-    '<b>Color accumulate</b> — colors build up over time without fully clearing.',
-    '<b>Strobe freeze</b> — freezes a frame periodically then blends it with live feed.',
-    '<b>Luma gate</b> — only bright areas get fed back.',
-    '<b>Intensity</b> controls how much feedback vs clean signal you see.'
+
+  // ── topbar, left to right ──
+  theme:{icon:'◑',title:'dark / light',tips:[
+    'Switches the interface between dark and light. Dark is on by default.',
+    '<b>scope</b> — only the interface colors swap. Sources, previews, output and captures are untouched.'
   ]},
-  pixelops:{icon:'▦',title:'pixel operations',tips:[
-    '<b>Edge detect</b> — highlights boundaries between areas of contrast.',
-    '<b>Emboss</b> — creates a 3D relief effect from brightness differences.',
-    '<b>Erosion</b> — shrinks bright areas. Param controls radius.',
-    '<b>Dilation</b> — expands bright areas. Param controls radius.',
-    '<b>Posterize</b> — reduces to a limited number of color levels.',
-    '<b>Threshold</b> — converts image to pure black and white at a set level.',
-    '<b>Bloom</b> — adds a glow around bright areas. Param controls spread.',
-    '<b>Chroma aberration</b> — shifts R and B channels in opposite directions.'
-  ]},
-  reaction:{icon:'⬡',title:'reaction',tips:[
-    '<b>Reaction diffusion</b> — simulates chemical reactions producing organic patterns.',
-    'Different presets produce <b>spots, stripes, coral, mazes</b> — all from the same math.',
-    '<b>Gray-Scott</b> — the classic two-chemical simulation. Feed rate shapes the pattern.',
-    '<b>Param</b> controls the feed rate — small changes produce dramatically different patterns.',
-    'The simulation is <b>seeded from your video</b> — dark areas in the source become reaction seeds.',
-    'Patterns evolve over time — give it a few seconds to develop after adding.',
-    'Reset the pattern by switching between presets.',
-    'This is a <b>paid tier</b> module due to CPU intensity.'
-  ]},
-  perlin:{icon:'〜',title:'perlin noise',tips:[
-    '<b>Perlin noise</b> — smooth organic randomness. Unlike LFO it never repeats exactly.',
-    '<b>Slow drift</b> — single octave, ultra-low freq. Barely moves. Good for color drift.',
-    '<b>Turbulence</b> — high freq, fast. Nervous energy. Good for jitter effects.',
-    '<b>Domain warp</b> — noise warps its own coordinate space. Self-distorting, fluid.',
-    '<b>Ridged</b> — abs(noise), inverted. Sharp bright peaks, dark valleys.',
-    '<b>Billow</b> — squared noise. Soft puffy clouds. Slow and organic.',
-    '<b>Fractal fBm</b> — multi-octave sum. Param controls octave count.',
-    '<b>Warp feedback</b> — domain warp that accumulates over time. Gets stranger the longer it runs.',
-    '<b>Cellular</b> — Voronoi distance field. Param = cell scale. Good for bubble-like pulses.'
-  ]},
-  envelope:{icon:'◬',title:'envelope',tips:[
-    '<b>Envelope</b> — fires a one-shot shape when triggered. Like a note on a synth.',
-    'Pick a shape: <b>AD</b> (attack-decay), <b>ADSR</b>, percussive, exponential, sine bell etc.',
-    'Hit the <b>▶ TRIGGER</b> button to fire the envelope manually.',
-    '<b>Speed</b> controls how fast the envelope runs through its shape.',
-    '<b>Depth</b> controls how much the target knob moves.',
-    'Assign a target using <b>Send to →</b> just like the LFO.',
-    'Use it for one-shot visual hits in sync with music or performance cues.',
-    'Multiple envelopes can run simultaneously, each targeting different knobs.'
-  ]},
-  audio:{icon:'♪',title:'audio',tips:[
-    '<b>Audio</b> — analyses your microphone or audio input in real time.',
-    'Pick a frequency band: <b>bass, mid, treble</b> — each tracks that part of the spectrum.',
-    '<b>RMS</b> tracks overall loudness. <b>Peak</b> catches the loudest moment.',
-    '<b>Transient</b> fires on sudden loud hits — good for kick drums.',
-    '<b>Bass inv / Mid inv</b> — inverted versions: knob goes down when loud.',
-    '<b>Rate</b> controls sensitivity. <b>Depth</b> controls how far the target knob moves.',
-    'Assign a target using <b>Send to →</b> to make visuals react to sound.',
-    'First use will ask for microphone permission.'
-  ]},
-  sequencer:{icon:'▤',title:'sequencer',tips:[
-    '<b>Sequencer</b> — steps through 8 values on a clock, like a step sequencer on a synth.',
-    '<b>Click the waveform bars</b> to set each step\'s value — drag up/down to adjust.',
-    '<b>Clock</b> knob controls how fast it steps through the sequence.',
-    '<b>Depth</b> controls how much the target knob moves at each step.',
-    'Assign a target using <b>Send to →</b> to automate any knob rhythmically.',
-    'The active step glows yellow. The sequence loops continuously.',
-    'Use it to create repeating patterns — good for strobing effects or rhythmic color shifts.',
-    'Stack multiple sequencers on different targets for polyrhythmic visuals.'
-  ]},
-  geometry:{icon:'◻',title:'geometry',tips:[
-    '<b>Scale</b> — zoom in or out from center. Left = out, right = in.',
-    '<b>Rotate</b> — continuous rotation. Left = CCW, center = stopped, right = CW.',
-    '<b>Tile</b> — repeats image in a grid. Param = tile count.',
-    '<b>Kaleidoscope</b> — mirror folds into segments. Param = segment count.',
-    '<b>Mirror</b> — splits and mirrors half the frame. Param cycles L/R/T/B.',
-    '<b>Perspective</b> — horizontal skew. Center = straight, left/right = opposite skew.',
-    '<b>Polar warp</b> — rectangular to polar coordinate remap.',
-    '<b>Ripple</b> — animated sine distortion. Param = frequency.'
-  ]},
-  keyer:{icon:'⬡',title:'keyer',tips:[
-    '<b>Keyer</b> — composites raw B over whatever signal is flowing through the chain at this point.',
-    '<b>Luma dark</b> — cuts dark areas of B. Param = threshold. Dark parts become transparent.',
-    '<b>Luma bright</b> — cuts bright areas of B. Param = threshold.',
-    '<b>Chroma green / blue</b> — standard green/blue screen key. Param = tolerance.',
-    '<b>Chroma custom</b> — key any hue. Param sweeps the hue wheel.',
-    '<b>Luma invert</b> — keeps dark areas, cuts bright. Reverse of luma dark.',
-    '<b>Color isolate</b> — only the selected hue range passes through. Everything else is cut.',
-    '<b>Contrast key</b> — keys on sharp edges. Param = edge sensitivity.',
-    '<b>Intensity</b> controls the softness of the key edge.'
-  ]},
-  ascii:{icon:'⌨',title:'ascii',tips:[
-    '<b>ASCII</b> — maps brightness to ASCII characters. Dense chars = bright, spaces = dark.',
-    '<b>Braille</b> — uses braille dot patterns for a fine-grain halftone look.',
-    '<b>Binary 01</b> — pure 1-bit: bright pixels = 1, dark = 0. Param controls cell size.',
-    '<b>Japanese ASCII</b> — katakana + hex characters instead of latin. Matrix aesthetic.',
-    '<b>Block symbols</b> — █▓▒░ block characters. Chunky and high contrast.',
-    '<b>Halftone</b> — circles scaled by brightness. Classic print halftone.',
-    '<b>Scan lines</b> — vertical brightness mapped to horizontal line thickness.',
-    '<b>Crosshatch</b> — cross marks scaled by brightness. Etching / engraving look.',
-    '<b>Param</b> controls cell size — left = fine grain, right = chunky blocks.'
-  ]},
-  randwalk:{icon:'⟿',title:'random walk',tips:[
-    '<b>Random walk</b> — organic randomness that wanders rather than oscillating.',
-    '<b>Slow / medium / fast</b> — controls how quickly the value drifts. Velocity-based.',
-    '<b>Stepped</b> — jumps to a new random value at intervals. Param controls step rate.',
-    '<b>Drunk walk</b> — fully random velocity each frame. Erratic, no momentum.',
-    '<b>Pendulum</b> — sine-based swing between 0 and 1. Param controls range.',
-    '<b>Gravity pull</b> — value is attracted toward a center point, param sets where center is.',
-    '<b>Brownian</b> — pure Brownian motion. Each step is independent, no memory.',
-    '<b>Depth</b> controls how wide the walk can range. Scrolling waveform shows history.'
-  ]},
-  xypad:{icon:'⊕',title:'XY pad',tips:[
-    '<b>XY pad</b> — two independent outputs from one draggable pad. X and Y axes route separately.',
-    '<b>Drag the pad</b> to set position. X = horizontal, Y = vertical.',
-    'Assign <b>X → target</b> and <b>Y → target</b> independently using the dropdowns.',
-    'Both axes target the immediate upstream module or the master crossfade.',
-    '<b>Depth</b> controls how much of the pad range translates to the target knob.',
-    'Use it for expressive two-dimensional real-time control during performance.',
-    'Try: X → geometry scale, Y → color hue for a 2D visual performance controller.',
-    'The green dot is X output, the orange dot is Y output.'
-  ]},
-  video:{icon:'⊟',title:'video source',tips:[
-    '<b>Video</b> — load a video file from your computer.',
-    'Supported formats: MP4, WebM, MOV, and most other common video formats.',
-    'Videos loop automatically with a 5-second crossfade at the loop point.',
-    'Click <b>replace</b> on the source node to swap to a different file at any time.'
-  ]},
-  image:{icon:'⊠',title:'image source',tips:[
-    '<b>Image</b> — load a still image (JPG, PNG, GIF, WebP) from your computer.',
-    'Choose from 8 <b>appear/disappear presets</b>: fade, blink, dissolve, wipe, scan in, zoom, glitch, and rotate.',
-    '<b>Duration</b> controls how long the animation takes (0–4 seconds).',
-    '<b>▶ in</b> triggers the appear animation. <b>◀ out</b> triggers disappear.'
-  ]},
-  webcam:{icon:'◉',title:'webcam source',tips:[
-    '<b>Webcam</b> — live camera input. Browser will ask for camera permission on first use.',
-    'Any USB or built-in camera works, including <b>USB capture cards</b> which appear as webcams.',
-    'To use an <b>RCA or analog device</b>: connect via RCA→HDMI converter + USB capture card.',
-    'With <b>multiple cameras</b>, a device selector appears — switch between them at any time.',
-    '<b>Flip H / Flip V</b> — mirror the feed horizontally or vertically. Toggle any time live.',
-    'The live feed processes through the full chain in real time.',
-    'Camera stays active until you replace or remove the source.'
-  ]},
-  screen:{icon:'▣',title:'screen capture',tips:[
-    '<b>Screen capture</b> — capture any window, tab, or your entire screen as a live source.',
-    'Browser will show a picker — choose a window, a specific tab, or full screen.',
-    'Capture a <b>YouTube tab</b> to use online video as a source.',
-    'Capture another <b>Visual Synth window</b> to chain two instances together.',
-    'If the captured window is closed or the stream ends, the slot automatically clears.'
-  ]},
-  url:{icon:'⊞',title:'archive',tips:[
-    '<b>Archive</b> — paste any archive.org page URL and m-or.ph finds the video automatically.',
-    'Example: https://archive.org/details/some-item — no digging for direct file links.',
-    'm-or.ph hits the archive.org metadata API, picks the best quality .mp4, and loads it.',
-    'Only archive.org URLs are accepted.'
-  ]},
-  videos:{icon:'🎲',title:'random',tips:[
-    '<b>Random</b> — pulls 6 random videos from the Internet Archive.',
-    'No category filter — anything goes. Duration capped at ~33 min for fast loading.',
-    'Click any result to load it. Hit <b>refresh</b> for a new set.',
-    'Good for happy accidents during live sets.'
-  ]},
-  solidcolor:{icon:'■',title:'solid color',tips:[
-    '<b>Solid color</b> — fills the source slot with a flat color.',
-    'Most useful as a <b>background layer</b> combined with the keyer module.',
-    'Try: solid color in A, video in B, add a keyer — key out the background of B over the color.',
-    'The 10 swatches cover the primary additive and subtractive colors.',
-    'Click any swatch to switch color instantly — the output updates in real time.'
-  ]},
-  text:{icon:'T',title:'text source',tips:[
-    '<b>Text</b> — renders typed text as a video source with a transparent background.',
-    'Type in the text box. Use line breaks for multi-line layouts. Text auto-sizes to fill the frame.',
-    '<b>8 pixel/1-bit fonts</b>: Press Start 2P, VT323, Silkscreen, Tiny5, Pixelify Sans, DotGothic16, Departure Mono, Share Tech Mono.',
-    '<b>Color</b> — pick font color from 8 presets.',
-    'Background is transparent in the mixer and output — composites cleanly over the other source.',
-    'Combine with the <b>keyer</b> module or adjust the crossfader to blend with another source.'
-  ]},
-  pattern:{icon:'▦',title:'moving pattern',tips:[
-    '<b>Moving patterns</b> — procedurally generated animated visuals, no source file needed.',
-    '<b>Plasma</b> — classic sine wave interference field, shifting RGB colors.',
-    '<b>Dye drop</b> — ink diffusing in fluid, real velocity field simulation.',
-    '<b>Radial pulse</b> — rings expanding from center, good for beat sync.',
-    '<b>Interference</b> — two wave sources crossing, moiré-like patterns.',
-    '<b>Hex grid, Starfield, Noise field, Vortex</b> — geometric and flow-based patterns.',
-    '<b>Speed</b> controls animation rate. All patterns run indefinitely.'
-  ]},
-  mathematical:{icon:'∿',title:'mathematical',tips:[
-    '<b>Mathematical sources</b> — genuinely non-repeating generative systems.',
-    '<b>Lorenz / De Jong / Ikeda</b> — strange attractors that trace paths through parameter space. Never repeats.',
-    '<b>Lissajous</b> — parametric curves whose frequency ratios drift slowly. Geometric and hypnotic.',
-    '<b>Voronoi</b> — cells that drift, spawn, and split continuously.',
-    '<b>Newton fractal</b> — basin boundaries shift as root targets rotate over time.',
-    '<b>Mandelbrot zoom</b> — slow automated zoom into a deep coordinate.',
-    '<b>Julia set</b> — complex fractal whose shape morphs as the C parameter drifts.',
-    'None of these ever settle or repeat — they evolve for as long as they run.'
-  ],},
-  theme:{icon:'◑',title:'dark / light mode',tips:[
-    'Toggles between <b>dark mode</b> (inverted, black background) and light mode.',
-    'Dark mode inverts the UI only — source video and canvas output are unaffected.',
-    'Useful for low-light performance environments or personal preference.',
-  ]},
-  tv:{icon:'▢',title:'TV mode',tips:[
-    '<b>TV mode</b> — re-lays the full interface out for a real 4:3 TV or CRT and goes fullscreen automatically.',
-    'The 4:3 stage scales to fill whatever screen it lands on — drag the window onto the tube and toggle.',
-    'Everything stays usable, paginated into <b>4 channels</b>: CH1 output, CH2 chain, CH3 inputs, CH4 fx. Switch with the channel bar or keys <b>1–4</b>.',
-    'The CRT overlay turns off on entry (a real tube brings its own scanlines) and is restored on exit. Dark/light stays available in the topbar.',
-    'Render output switches to 4:3 480p to match; turning TV off restores 16:9 854×480.'
-  ]},
-  crt:{icon:'⬡',title:'CRT mode',tips:[
-    '<b>CRT mode</b> — overlays a CRT screen simulation on top of the entire interface.',
-    'Adds scanlines, phosphor fuzz, oval vignette, and sporadic glitch lines.',
-    'Random horizontal tears and frame shifts fire unpredictably for that analog feel.',
-    'Stacks with either light or dark mode.'
-  ]},
-  pip:{icon:'⧉',title:'output popup',tips:[
-    '<b>Output popup</b> — floating preview of the master output, draggable and resizable.',
-    'Three size presets: small (240×135), medium (400×225), large (560×315).',
-    'Good for monitoring while your screen is occupied with the chain.'
-  ]},
-  outputwindow:{icon:'▣',title:'output window',tips:[
-    '<b>Output window</b> — opens master output in a separate browser window.',
-    'Move to a <b>second screen or projector</b> and press <b>F</b> to fullscreen.',
-    'If it closes unexpectedly, just click again to reopen.'
-  ]},
-  fullscreen:{icon:'⛶',title:'fullscreen',tips:[
-    'Toggles the <b>main m-or.ph interface</b> to fullscreen.',
-    'For performance, it\'s usually better to fullscreen the <b>output window</b> instead.',
-    'Press <b>Escape</b> to exit fullscreen at any time.',
-    'Keyboard shortcut: <b>F</b>'
-  ]},
-  masterpreview:{icon:'◈',title:'master output',tips:[
-    'Live preview of the <b>final processed output</b> — exactly what goes to the output window.',
-    'This is after all modules in the chain have been applied.',
-    'Updates every frame in sync with the main render loop.',
-    'The output window and PiP also show this same final image.'
-  ]},
-  chainbar:{icon:'→',title:'signal chain',tips:[
-    'Shows the <b>live signal flow</b> from inputs through every effect to master output.',
-    'Click any <b>effect name</b> to jump directly to it in the chain.',
-    'Updates instantly when you add, remove, or reorder effects.',
-    'Format: <b>[A + B] · mixer · effect · effect · ... · master output</b>'
-  ]},
-  crossfade:{icon:'⇔',title:'A/B crossfade',tips:[
-    'Blends <b>input A</b> (left) and <b>input B</b> (right).',
-    '0% = only A · 100% = only B · 50% = equal mix.',
-    'Assign an <b>oscillator</b> or MIDI controller for hands-free control.'
-  ]},
-  fps:{icon:'◷',title:'frame rate',tips:[
-    'Current render speed in <b>frames per second</b>. Target: at least 24 FPS.',
-    'Drops below 15 trigger a warning. usually means too many heavy effects active.',
-    'Remove or bypass heavy effects to recover performance.'
-  ]},
-  rec:{icon:'⏺',title:'capture',tips:[
-    '<b>Capture</b> — opens the capture panel for photo and video.',
-    '<b>Format</b> — choose 16:9 (full), 1:1 (square), or 9:16 (portrait). Photo and video are cropped at save time — the pipeline is unchanged.',
-    '<b>Countdown</b> — OFF or 3 SEC. Ticks inline in the panel, no fullscreen takeover. ESC cancels.',
-    '<b>Photo</b> — saves a PNG of the current frame. White flash confirms the capture.',
-    '<b>Video</b> — records master output as WebM (max 60s). Button inverts and shows timer while recording. Click again to stop and download.',
-    'The CAPTURE button in the footer inverts to show <b>● REC</b> while a recording is active.'
-  ]},
-  photo:{icon:'◻',title:'capture',tips:[
-    '<b>Capture</b> — opens the capture panel for photo and video.',
-    '<b>Format</b> — choose 16:9 (full), 1:1 (square), or 9:16 (portrait). Photo and video are cropped at save time — the pipeline is unchanged.',
-    '<b>Countdown</b> — OFF or 3 SEC. Ticks inline in the panel, no fullscreen takeover. ESC cancels.',
-    '<b>Photo</b> — saves a PNG of the current frame. White flash confirms the capture.',
-    '<b>Video</b> — records master output as WebM (max 60s). Button inverts and shows timer while recording. Click again to stop and download.',
-    'The CAPTURE button in the footer inverts to show <b>● REC</b> while a recording is active.'
-  ]}
-  ,vandope:{icon:'▲',title:'vandope',tips:[
-    '<b style="background:var(--ink);color:var(--paper);padding:0 3px;">vandope</b> is a visual engineer and creative technologist based in Manila, Philippines, building experimental tools and interfaces that blend analog aesthetics, code, circuitry, noise, and moving images.',
-    'Follow him on <a href="https://instagram.com/vandope__" target="_blank" style="background:var(--ink);color:var(--paper);padding:0 3px;text-decoration:none;">instagram.com/vandope__</a>'
-  ]},
-  inputs:{icon:'⬡',title:'inputs',tips:[
-    'The inputs panel holds your two sources, A and B.',
-    'Each input slot can hold one source at a time: a file, webcam, pattern, screen capture, or archive footage.',
-    'Click <b>add</b> to load a source. Click <b>replace</b> to swap it without interrupting the output.',
-    'The <b>A↔B</b> button swaps both inputs instantly.',
-    'Collapse either input node to save space during performance.'
-  ]},
-  effects:{icon:'◑',title:'effects',tips:[
-    'The effects panel is where you build your chain.',
-    'Effects are grouped into three categories: <b>processors</b>, <b>glitch</b>, and <b>modulators</b>.',
-    'Click any effect to add it. Up to 5 effects at once.',
-    'Effects marked <b>HEAVY</b> cost more to run. Watch the FPS counter.'
-  ]},
-  processors:{icon:'◑',title:'processors',tips:[
-    'Processors transform the image cleanly.',
-    'Color grading, geometry, feedback, pixel operations — all non-destructive.',
-    'Good starting point before adding glitch on top.'
-  ]},
-  glitch:{icon:'◧',title:'glitch',tips:[
-    'Glitch effects break the image on purpose.',
-    'Datamosh, VHS, signal noise, row shift, pixel sort, block corrupt.',
-    'Stack with processors for controlled destruction.'
-  ]},
-  modulators:{icon:'◎',title:'modulators',tips:[
-    'Modulators don\'t process video. They move knobs automatically.',
-    'Assign any modulator to any knob in your chain using <b>send to →</b>.',
-    'Oscillator, random walk, XY pad, sequencer, audio reactive, and perlin noise.',
-    'You can run multiple modulators targeting different knobs at once.'
+  crt:{icon:'⬡',title:'crt',tips:[
+    'Lays a CRT screen simulation over the whole interface. On by default.',
+    '<b>look</b> — scanlines, phosphor fuzz, a corner vignette, a rolling band and flicker.',
+    '<b>glitches</b> — random tear lines and small frame slips fire every few seconds.',
+    '<b>scope</b> — interface only. The output and captures stay clean. Turns off in sd mode.'
   ]},
   statusbar:{icon:'◂',title:'status',tips:[
-    'Shows the current state of the app.',
-    '<b>ready</b> means everything is running. Messages appear here during actions like loading and recording.',
-    'If something breaks, check here first.'
+    'Shows what the app is doing right now.',
+    '<b>ready</b> — idle and running. Loading, recording, permissions and errors report here.',
+    '<b>eco level</b> — shown when the performance governor lowers resolution to protect 24 fps.'
   ]},
   tutorial:{icon:'?',title:'tutorial',tips:[
-    'Opens the interactive tutorial.',
-    'Walks you through every part of the app chapter by chapter.',
-    'If you\'ve already finished it, you can click through freely as a reference.',
-    'It remembers where you left off.'
+    'Opens the interactive tutorial, five chapters covering every part of the app.',
+    '<b>resume</b> — it remembers where you stopped and picks up there.',
+    '<b>review</b> — once finished, every step can be skipped freely.',
+    '<b>hd only</b> — not available in sd mode.'
+  ]},
+  pip:{icon:'⧉',title:'output popup',tips:[
+    'A floating preview of the master output inside this window.',
+    '<b>bar</b> — drag the top bar to move it. ✕ closes it.',
+    '<b>sizes</b> — three squares in the bar: small 240×135, medium 400×225, large 560×315.',
+    '<b>output window</b> — the popup pauses while the output window is open.'
+  ]},
+  outputwindow:{icon:'▣',title:'output window',tips:[
+    'Opens the master output in its own browser window, for a projector or second screen.',
+    '<b>F</b> — press F inside that window to go fullscreen.',
+    '<b>pop-ups</b> — if nothing opens, allow pop-ups for this site. Clicking again while it is open focuses it.',
+    '<b>heavy fx</b> — while it is open, heavy effects update every other frame to keep both windows smooth.'
+  ]},
+  tv:{icon:'▢',title:'hd / sd',tips:[
+    'Switches between hd (16:9, 854×480) and sd (4:3, 640×480) for a real tv or crt.',
+    '<b>sd</b> — the interface stretches to fill the screen, goes fullscreen and the crt overlay turns off.',
+    '<b>channels</b> — sd splits the app into CH1 inputs, CH2 chain, CH3 effects, CH4 output. Use the channel bar or keys 1–4.',
+    '<b>hd</b> — switching back restores 16:9 and the crt overlay.'
+  ]},
+  fullscreen:{icon:'⛶',title:'fullscreen',tips:[
+    'Puts the whole m-or.ph interface in fullscreen. Click again or press Esc to exit.',
+    '<b>tip</b> — for a show, fullscreen the output window instead (F inside it).'
+  ]},
+
+  // ── inputs panel, top to bottom ──
+  inputs:{icon:'⬡',title:'inputs',tips:[
+    'The source types you can load into input A or B. Click the header to collapse the list.',
+    '<b>pick</b> — click a type to fill the first empty input. To choose the slot, click <b>add</b> or <b>replace</b> on that input first.',
+    '<b>replace</b> — the old source keeps playing until the new one is ready.',
+    '<b>previews</b> — loaded inputs show as thumbnails under the list.'
+  ]},
+  video:{icon:'⊟',title:'video',tips:[
+    'Loads a video file from your computer. Any format your browser can play works.',
+    '<b>loop</b> — clips loop with a 5 second crossfade at the loop point.',
+    '<b>sound</b> — videos play muted.'
+  ]},
+  image:{icon:'⊠',title:'image',tips:[
+    'Loads a still image (jpg, png, gif, webp) and fits it inside the frame.',
+    '<b>transparency</b> — empty margins and transparent pixels show the other input through.',
+    '<b>crossfade</b> — over an opaque input, the crossfader fades the image in and out.'
+  ]},
+  text:{icon:'T',title:'text',tips:[
+    'Renders typed text on a transparent background. It scales to fill the frame.',
+    '<b>text</b> — type in the box. Line breaks make multi-line layouts.',
+    '<b>font</b> — 8 pixel fonts: press start 2p, vt323, silkscreen, tiny5, pixelify sans, dotgothic16, departure mono, share tech.',
+    '<b>color</b> — white, black, red, green, cyan, yellow, magenta or orange.'
+  ]},
+  webcam:{icon:'◉',title:'webcam',tips:[
+    'Live camera input. The browser asks for camera permission the first time.',
+    '<b>camera</b> — with more than one camera a selector appears on the input. Switching keeps the old feed until the new one opens.',
+    '<b>capture cards</b> — usb capture cards show up as cameras. For rca gear, use rca → hdmi → usb capture.'
+  ]},
+  solidcolor:{icon:'■',title:'solid color',tips:[
+    'Fills the input with one flat color.',
+    '<b>swatches</b> — 10 presets. Click one to switch instantly.',
+    '<b>hex</b> — type any 3 or 6 digit hex code for a custom color.',
+    '<b>tip</b> — use it behind a keyer to drop a flat background behind input B.'
+  ]},
+  screen:{icon:'▣',title:'screen capture',tips:[
+    'Uses a window, a browser tab or your whole screen as a live input.',
+    '<b>picker</b> — the browser asks which window, tab or screen to share. Capture runs at up to 1280×720, 30 fps.',
+    '<b>ending</b> — stop sharing and the input clears itself.',
+    '<b>tip</b> — capture a tab playing online video, or a second m-or.ph window to chain two instances.'
+  ]},
+  url:{icon:'⊞',title:'archive',tips:[
+    'Loads a video from an archive.org page. Paste the page link, not a file link.',
+    '<b>link</b> — for example archive.org/details/some-item. Only archive.org links are accepted.',
+    '<b>file</b> — m-or.ph picks the best playable mp4 under about 250 MB.'
+  ]},
+  videos:{icon:'⚄',title:'random',tips:[
+    'Offers 6 random clips from a curated set of Internet Archive films.',
+    '<b>pick</b> — click a thumbnail to load it. Loading can take up to a minute.',
+    '<b>randomize</b> — deals a new set of 6.'
+  ]},
+  pattern:{icon:'▦',title:'moving pattern',tips:[
+    'Generated animated visuals. No file needed.',
+    '<b>plasma</b> — overlapping sine waves in shifting color.',
+    '<b>starfield</b> — stars flying toward you.',
+    '<b>dye drop</b> — ink spreading in a simulated fluid.',
+    '<b>radial pulse</b> — rings pulsing out from the center.',
+    '<b>interference</b> — two moving wave sources crossing into moiré.',
+    '<b>noise field</b> — slowly flowing colored perlin noise.',
+    '<b>hex grid</b> — a drifting honeycomb of shaded cells.',
+    '<b>vortex</b> — a spiral twisting around the center.',
+    '<b>tip</b> — the speed slider sets the animation rate.'
+  ]},
+  mathematical:{icon:'∿',title:'mathematical',tips:[
+    'Generative math systems that keep evolving and never settle into a loop.',
+    '<b>lorenz</b> — the lorenz strange attractor traced as a glowing path.',
+    '<b>de jong</b> — a point cloud attractor whose parameters slowly drift.',
+    '<b>ikeda map</b> — chaotic spiral dynamics from laser physics.',
+    '<b>lissajous</b> — parametric curves with drifting frequency ratios.',
+    '<b>voronoi</b> — cells that drift, spawn and split.',
+    '<b>newton</b> — newton fractal basins turning as the roots rotate.',
+    '<b>mandelbrot</b> — slow zoom into the set and back out.',
+    '<b>julia set</b> — a julia fractal morphing as its constant drifts.',
+    '<b>tip</b> — the speed slider sets how fast each system evolves.'
+  ]},
+  swap:{icon:'⇅',title:'swap a / b',tips:[
+    'Swaps the sources in input A and input B, settings included.',
+    '<b>keyer</b> — the keyer always reads input B, so swapping flips what gets keyed.'
+  ]},
+
+  // ── center chain ──
+  vandope:{icon:'▲',title:'vandope',tips:[
+    'm-or.ph is built by a visual engineer and creative technologist in Manila, Philippines, making experimental tools that mix analog aesthetics, code, circuitry, noise and moving images.',
+    '<b>instagram</b> — <a href="https://instagram.com/vandope__" target="_blank" rel="noopener" style="background:var(--ink);color:var(--paper);padding:0 3px;text-decoration:none;">instagram.com/vandope__</a>'
+  ]},
+  srcnode:{icon:'⊟',title:'input node',tips:[
+    'One of the two inputs feeding the mixer. Click its header to collapse it.',
+    '<b>add / replace</b> — starts picking a source for this input. Click again to cancel.',
+    '<b>size · rotate · fade</b> — scale 0–200%, continuous spin either way, and opacity for this input.',
+    '<b>flip h · flip v</b> — mirror the input horizontally or vertically.'
+  ]},
+  mixer:{icon:'⇔',title:'mixer',tips:[
+    'Blends input A and input B into one signal before the effects chain.',
+    '<b>slider</b> — left is all A, right is all B, middle is an equal mix. Same value as the crossfader at the bottom.',
+    '<b>text · image</b> — a text or image input layers over the other one, and the slider fades it in and out.',
+    '<b>modulate</b> — any modulator can target mixer — crossfade.'
+  ]},
+
+  // ── effects panel, top to bottom ──
+  effects:{icon:'◑',title:'effects',tips:[
+    'Click an effect to add it to the chain. The chain runs top to bottom, after the mixer.',
+    '<b>limits</b> — up to 10 effects, plus up to 6 modulators that do not count toward the 10.',
+    '<b>heavy</b> — ascii, signal noise, datamosh, block corrupt and pixel sort cost more. Up to 3 at once.',
+    '<b>gpu</b> — most effects run on the gpu (webgl 2). If a frame gets too expensive, the governor lowers resolution, then recovers.'
+  ]},
+  processors:{icon:'◑',title:'processors',tips:[
+    'Effects that reshape the image cleanly: keying, color, geometry, feedback, pixel operations and ascii.',
+    '<b>tip</b> — set up processors first, then add glitch below them.'
+  ]},
+  keyer:{icon:'⬡',title:'keyer',tips:[
+    'Lays the raw input B over the chain above it and cuts parts of B away so the chain shows through.',
+    '<b>luma dark</b> — cuts the dark parts of B. param = threshold.',
+    '<b>luma bright</b> — cuts the bright parts of B. param = threshold.',
+    '<b>luma invert</b> — keeps only the parts of B brighter than param.',
+    '<b>chroma green</b> — green screen. param = how green a pixel must be before it is cut.',
+    '<b>chroma blue</b> — blue screen. param = how blue a pixel must be before it is cut.',
+    '<b>chroma custom</b> — cuts one hue of your choice. param = hue.',
+    '<b>color isolate</b> — keeps only one hue of B. param = hue.',
+    '<b>contrast key</b> — keeps only the edges of B. param = edge threshold.',
+    '<b>tip</b> — intensity = opacity of B. Pair a video in B with a solid color or pattern in A.'
+  ]},
+  color:{icon:'◑',title:'color',tips:[
+    'Regrades the colors of the signal.',
+    '<b>LUT</b> — three looks: invert, warm mono, cool mono. param = look.',
+    '<b>saturation</b> — param left = grayscale, right = original color.',
+    '<b>channel remap</b> — rotates or inverts the r/g/b channels. param = one of 5 mappings.',
+    '<b>duotone</b> — tints the image in a single hue. param = hue.',
+    '<b>hue rotate</b> — turns every color around the wheel. param = rotation.',
+    '<b>false color</b> — maps brightness onto a color ramp. param = one of 4 palettes.',
+    '<b>palette reduce</b> — posterizes the colors. param right = fewer steps.',
+    '<b>color trails</b> — bright colors linger and fade out. param = trail length.',
+    '<b>tip</b> — intensity blends every mode with the original. Modulators can also drive this effect\'s red, green and blue levels.'
+  ]},
+  geometry:{icon:'◻',title:'geometry',tips:[
+    'Moves, folds and warps the frame.',
+    '<b>mirror</b> — reflects one half onto the other. param = left, right, top or bottom.',
+    '<b>scale</b> — zooms from the center. param left = out, right = in. intensity = amount.',
+    '<b>tile</b> — repeats the frame in a grid. param = 1–8 tiles per side.',
+    '<b>rotate</b> — spins continuously. param = speed and direction, center = stopped.',
+    '<b>polar warp</b> — wraps the frame into polar coordinates. intensity = mix.',
+    '<b>ripple</b> — animated sine wobble. param = frequency, intensity = depth.',
+    '<b>kaleidoscope</b> — mirrored wedges around the center. param = 2–16 segments.',
+    '<b>perspective</b> — skews rows for a tilted plane. param = direction, center = flat. intensity = amount.'
+  ]},
+  feedback:{icon:'∞',title:'feedback',tips:[
+    'Feeds each output frame back into the next one for trails, tunnels and echoes.',
+    '<b>echo decay</b> — previous frames trail over the live image. param = trail length, intensity = mix.',
+    '<b>ghost layer</b> — two faded copies offset left and right. param = offset.',
+    '<b>zoom tunnel</b> — every pass zooms in, building a tunnel. param = zoom per frame.',
+    '<b>strobe freeze</b> — holds a frame, then snaps to live. param right = refreshes more often.',
+    '<b>rotation drift</b> — trails rotate as they fade. param = speed and direction, center = still.',
+    '<b>pixel smear</b> — trails slide sideways. param = direction and distance.',
+    '<b>shatter</b> — scattered, jittering copies. param = how many and how far.',
+    '<b>mirror drift</b> — a flipped copy drifts across the trails. param = speed and direction.',
+    '<b>tip</b> — except in echo decay and strobe freeze, intensity sets how long trails survive.'
+  ]},
+  pixelops:{icon:'▦',title:'pixel operations',tips:[
+    'Per-pixel image filters.',
+    '<b>chroma</b> — splits red and blue sideways. param = shift.',
+    '<b>posterize</b> — cuts each channel to a few levels. param = 2–16 levels.',
+    '<b>threshold</b> — pure black and white. param = cut level.',
+    '<b>edge detect</b> — white outlines where contrast changes. param = strength.',
+    '<b>emboss</b> — gray relief from brightness changes. param = strength.',
+    '<b>bloom</b> — soft glow around bright areas. param = radius.',
+    '<b>erosion</b> — shrinks bright areas, grows dark ones. param = 1–4 px radius.',
+    '<b>dilation</b> — grows bright areas. param = 1–4 px radius.',
+    '<b>tip</b> — intensity blends every mode with the original.'
+  ]},
+  ascii:{icon:'⌨',title:'ascii',tips:[
+    'Redraws the image as characters or marks on black, colored by the source. Heavy.',
+    '<b>scan lines</b> — rows of vertical ticks, longer where brighter. param = row spacing.',
+    '<b>block symbols</b> — █▓▒░ blocks by brightness.',
+    '<b>halftone</b> — dots that grow with brightness.',
+    '<b>crosshatch</b> — crosses that grow with brightness.',
+    '<b>binary</b> — 1 for bright cells, 0 for dark.',
+    '<b>braille dots</b> — braille patterns for a fine dot texture.',
+    '<b>ASCII dense</b> — classic character ramp, denser characters where brighter.',
+    '<b>japanese ascii</b> — katakana and hex characters.',
+    '<b>tip</b> — param = cell size (4–32 px), intensity = mix over the original.'
+  ]},
+  glitch:{icon:'◧',title:'glitch',tips:[
+    'Effects that break the image on purpose: vhs, signal noise, row shift, datamosh, block corrupt and pixel sort.',
+    '<b>tip</b> — stack them below processors for controlled destruction.'
+  ]},
+  vhs:{icon:'▷',title:'VHS',tips:[
+    'Analog tape artifacts. Each mode copies a different fault.',
+    '<b>color bleed</b> — red smears right, blue smears left.',
+    '<b>luma wobble</b> — brightness ripples down the scan lines.',
+    '<b>chroma shift</b> — red and blue drift apart from the image.',
+    '<b>head switch</b> — the bottom strip of the frame jumps sideways.',
+    '<b>tracking</b> — rows tear and jitter sideways, with tape noise.',
+    '<b>static burst</b> — random black and white specks.',
+    '<b>tape crinkle</b> — rows bend and stretch like creased tape.',
+    '<b>full vhs</b> — all of the above at once.',
+    '<b>tip</b> — intensity and param (amount) both scale the damage.'
+  ]},
+  signalnoise:{icon:'⣿',title:'signal noise',tips:[
+    'Adds noise to the signal in different ways. Heavy.',
+    '<b>luma noise</b> — monochrome grain, like film.',
+    '<b>quantize</b> — posterizes into flat bands. param right = fewer bands.',
+    '<b>chroma noise</b> — noise on red and blue only, for color fringing.',
+    '<b>rgb noise</b> — separate noise on each channel. Busy and colorful.',
+    '<b>salt pepper</b> — random pixels snap to pure black or white.',
+    '<b>bit flip</b> — flips random bits in random pixels. Sparse, harsh specks.',
+    '<b>hue drift</b> — shifts each pixel\'s hue by a random amount.',
+    '<b>full noise</b> — rgb, luma and salt-and-pepper noise together.',
+    '<b>tip</b> — intensity and param (amount) both scale it. Keep both low for subtle grain.'
+  ]},
+  rowshift:{icon:'≡',title:'row shift',tips:[
+    'Slides horizontal rows sideways, like a monitor losing sync.',
+    '<b>interlace</b> — even rows shift right, odd rows left.',
+    '<b>jitter</b> — random rows twitch every frame.',
+    '<b>scan drift</b> — every row holds its own small offset, re-rolled slowly.',
+    '<b>tear line</b> — a few thin rows tear hard each frame.',
+    '<b>sync loss</b> — large bands of the frame slide together.',
+    '<b>field flip</b> — neighboring 4-row bands swap places.',
+    '<b>scan line</b> — rows get copied from their neighbors with a small shift.',
+    '<b>full shift</b> — a rolling wave plus scan drift.',
+    '<b>tip</b> — both knobs scale the shift. An oscillator on intensity gives rhythmic sync-loss pulses.'
+  ]},
+  datamosh:{icon:'◧',title:'datamosh',tips:[
+    'Codec-style corruption. One mode at a time: click to switch, click the active one to turn it off. Heavy.',
+    '<b>bit crush</b> — fewer color levels. param right = fewer. On by default.',
+    '<b>warp wave</b> — rows sway on a sine wave. param = frequency, intensity = amplitude.',
+    '<b>i-frame drop</b> — holds a reference frame and pushes only motion through it. param right = refreshes more often.',
+    '<b>delta blend</b> — shows only what changed between frames. Still areas go gray. param = amplification.',
+    '<b>displace</b> — warps pixels along a slow brightness map. param = distance.',
+    '<b>pixel frame</b> — 16 px blocks pulled from the wrong spot of a lagging frame. intensity = how many, param = how far.',
+    '<b>flow smear</b> — a held frame gets smeared along the motion of the image. param = smear strength.',
+    '<b>avalanche</b> — colors drip downward and pile up. param = drag.',
+    '<b>tip</b> — intensity blends the mosh with the clean image.'
+  ]},
+  blockcorrupt:{icon:'▩',title:'block corrupt',tips:[
+    'Damages the frame in rectangular blocks. Heavy.',
+    '<b>stream corrupt</b> — horizontal bands slide sideways. param also sets band height.',
+    '<b>macro block</b> — big blocks flattened to one coarse color. param = block size.',
+    '<b>color block</b> — random solid-color blocks. param = size and count.',
+    '<b>dct block</b> — 8 px blocks swapped around the frame.',
+    '<b>tile swap</b> — bigger tiles swapped around. param = 16–64 px.',
+    '<b>ghost block</b> — see-through copies of tiles from elsewhere.',
+    '<b>freeze block</b> — tiles freeze and hold while the rest moves.',
+    '<b>full corrupt</b> — dct block swaps plus row tears.',
+    '<b>tip</b> — intensity × param (density) sets how many blocks hit each frame.'
+  ]},
+  pixelsort:{icon:'↕',title:'pixel sort',tips:[
+    'Sorts runs of pixels by brightness, saturation or hue for streaky glitch-art. Heavy.',
+    '<b>brightness</b> — sorts bright runs along each row.',
+    '<b>dark</b> — sorts dark runs along each row.',
+    '<b>saturation</b> — sorts runs by saturation, most vivid first.',
+    '<b>hue</b> — sorts runs by hue for rainbow banding.',
+    '<b>horizontal</b> — sorts whole rows, no threshold. intensity = share of rows.',
+    '<b>vertical</b> — sorts bright runs down each column.',
+    '<b>droopy</b> — bright pixels sink to the bottom of each run, like a drip.',
+    '<b>full sort</b> — a row pass, then a column pass.',
+    '<b>tip</b> — param (threshold) right = more pixels sorted. Higher intensity sorts shorter runs too.'
+  ]},
+  modulators:{icon:'◎',title:'modulators',tips:[
+    'Modulators make no picture of their own. They move knobs for you.',
+    '<b>send to →</b> — target the mixer crossfade, or a knob on the effect directly above the modulator.',
+    '<b>limit</b> — up to 6 modulators, separate from the 10 effect slots.',
+    '<b>tip</b> — drag a modulator just below the effect you want it to move.'
+  ]},
+  LFO:{icon:'◎',title:'oscillator',tips:[
+    'Moves a knob up and down in a repeating wave.',
+    '<b>sine</b> — smooth up and down.',
+    '<b>square</b> — snaps between high and low.',
+    '<b>saw</b> — ramps up, then drops.',
+    '<b>reverse saw</b> — drops, then ramps up.',
+    '<b>triangle</b> — linear up and down.',
+    '<b>random step</b> — jumps to a new random value 8 times per cycle.',
+    '<b>smooth random</b> — glides to a new random value each cycle.',
+    '<b>burst</b> — one short pulse per cycle.',
+    '<b>tip</b> — speed = 0.02–3 cycles per second, depth = how far it moves. Pick a target under send to →, then assign.'
+  ]},
+  xypad:{icon:'⊕',title:'XY pad',tips:[
+    'A draggable pad with two outputs, X and Y, for hands-on control.',
+    '<b>pad</b> — drag the dot. X grows to the right, Y grows upward.',
+    '<b>X · Y</b> — give each axis a target (mixer crossfade, or the effect directly above) and press set.',
+    '<b>scale</b> — how much of the pad range reaches the targets.'
+  ]},
+  randwalk:{icon:'⟿',title:'random walk',tips:[
+    'Moves a knob by wandering at random instead of repeating.',
+    '<b>slow drift</b> — gentle wandering with long momentum.',
+    '<b>medium walk</b> — moderate wandering.',
+    '<b>fast jitter</b> — quick, nervous wandering.',
+    '<b>stepped walk</b> — jumps to a new random value at intervals. param = range around the middle.',
+    '<b>drunk walk</b> — large random steps, no momentum.',
+    '<b>pendulum</b> — smooth swing around the middle. param = swing width.',
+    '<b>gravity pull</b> — wanders, but keeps getting pulled back to param.',
+    '<b>brownian</b> — small random steps, no momentum.',
+    '<b>tip</b> — intensity = speed. The scrolling line shows recent history.'
+  ]},
+  sequencer:{icon:'▤',title:'sequencer',tips:[
+    'Steps a knob through 8 values on a clock, like a step sequencer.',
+    '<b>P1</b> — kick: strong hits on 1 and 5.',
+    '<b>P2</b> — off-beat: hits between the beats.',
+    '<b>P3</b> — ramp up: accents with a rising tail.',
+    '<b>P4</b> — valley: high, down to low, back up.',
+    '<b>P5</b> — triangle: low, up to high, back down.',
+    '<b>P6</b> — square: two on, two off.',
+    '<b>P7</b> — irregular: an uneven pattern.',
+    '<b>P8</b> — descend: values falling across the bar.',
+    '<b>tip</b> — click a bar to set that step. Right-click a P slot to save your steps into it. clock = step rate, depth = output level.'
+  ]},
+  audio:{icon:'♪',title:'audio',tips:[
+    'Drives a knob from your microphone or audio input. Asks for mic permission the first time.',
+    '<b>bass</b> — low frequencies.',
+    '<b>middle</b> — mid frequencies.',
+    '<b>treble</b> — high frequencies.',
+    '<b>volume</b> — overall loudness.',
+    '<b>peak</b> — the loudest frequency at each moment.',
+    '<b>transient</b> — fires on sudden hits like kicks and claps.',
+    '<b>bass inverted</b> — drops when the bass is loud.',
+    '<b>middle inverted</b> — drops when the mids are loud.',
+    '<b>tip</b> — speed and depth both act as gain here. If permission was denied, use the retry button.'
+  ]},
+  perlin:{icon:'〜',title:'perlin noise',tips:[
+    'Moves a knob with smooth organic noise that never repeats exactly.',
+    '<b>slow drift</b> — very slow, smooth drift.',
+    '<b>turbulence</b> — fast, nervous movement.',
+    '<b>domain warp</b> — noise bending itself, fluid and uneven. param = warp amount.',
+    '<b>ridged peaks</b> — sits high with sharp dips.',
+    '<b>billow puffy</b> — soft bumps that mostly stay low.',
+    '<b>fractal noise</b> — layered detail. param = 1–8 octaves.',
+    '<b>warp feedback</b> — a warp that builds on itself and gets stranger over time. param = amount.',
+    '<b>cellular</b> — cell-like bumps and pulses. param = cell scale.',
+    '<b>tip</b> — speed = how fast it moves. The scrolling line shows recent history.'
+  ]},
+  envelope:{icon:'◬',title:'envelope',tips:[
+    'Fires a one-shot shape at a knob each time you press ▶ TRIGGER.',
+    '<b>attack decay</b> — rises, then falls.',
+    '<b>attack sustain</b> — rises, holds, then releases.',
+    '<b>ADSR</b> — attack, decay, sustain, release.',
+    '<b>percussive</b> — instant hit, quick fall.',
+    '<b>exponential</b> — instant hit with a slower fade than percussive.',
+    '<b>sine bell</b> — smooth swell up and down.',
+    '<b>reverse</b> — starts full, holds, then drops away at the end.',
+    '<b>ramp up</b> — climbs steadily to full.',
+    '<b>tip</b> — attack = how fast the shape plays, depth = how far it moves.'
+  ]},
+
+  // ── bottom bar ──
+  masterpreview:{icon:'◈',title:'master output',tips:[
+    'The final image after the mixer and every effect in the chain.',
+    '<b>same image</b> — this is what the output window, the output popup and capture get.'
+  ]},
+  chainbar:{icon:'→',title:'signal chain',tips:[
+    'The live signal path from both inputs through the mixer and every effect to the master output.',
+    '<b>effects</b> — click an effect name to open it in the chain.',
+    '<b>updates</b> — follows every add, remove and reorder.'
+  ]},
+  crossfade:{icon:'⇔',title:'crossfade',tips:[
+    'Blends input A (left) with input B (right). Same value as the mixer slider.',
+    '<b>0% · 50% · 100%</b> — only A · equal mix · only B.',
+    '<b>modulate</b> — point an oscillator, XY pad or other modulator at mixer — crossfade for hands-free blends.'
+  ]},
+  fps:{icon:'◷',title:'frame rate',tips:[
+    'Render speed in frames per second. Aim for 24 or more.',
+    '<b>⚠</b> — blinks at 15 fps or below. Bypass or remove heavy effects to recover.',
+    '<b>governor</b> — when a frame costs too much, it steps down through eco levels (heavy effects every other frame, then 75% and 50% resolution), then steps back up after a few smooth seconds.'
+  ]},
+  rec:{icon:'⏺',title:'capture',tips:[
+    'Opens the capture panel for photos and video of the master output.',
+    '<b>format</b> — 16:9, 1:1 or 9:16, cropped from the center at 720p. Captures stay 720p even when the governor lowers resolution.',
+    '<b>countdown</b> — off or 3 seconds, counted in the panel. Esc cancels.',
+    '<b>photo · video</b> — photo saves a png. Video records up to 60 seconds (webm, or mp4 in Safari). Click again to stop and save. The button shows ● REC while recording.'
   ]}
 };
 let helperLocked=false;
@@ -6469,39 +6560,46 @@ const MODULE_PROCESSORS={
 
 /* ── MODULE SYSTEM ── */
 
-const HEAVY_MODULES=new Set(['feedback','pixelops','ascii','datamosh','blockcorrupt','pixelsort','sequencer','audio','perlin']);
-const MAX_TOTAL=5;
-const MAX_HEAVY=2;
+// v1.6 moved most effects onto the GPU (~1-2ms each at 854x480 on an M1), so
+// the cap is on effects only; modulators barely render and get their own
+// ceiling. HEAVY = the CPU paths that still cost 3-13ms a frame.
+const HEAVY_MODULES=new Set(['ascii','signalnoise','datamosh','blockcorrupt','pixelsort']);
+const MAX_FX=10;
+const MAX_HEAVY=3;
+const MAX_MODS=6;
 
+const _isMod=m=>m.type==='modulator';
+function getFxCount(){ return state.modules.filter(m=>!_isMod(m)).length; }
+function getModCount(){ return state.modules.filter(_isMod).length; }
 function getHeavyCount(){ return state.modules.filter(m=>HEAVY_MODULES.has(m.name)).length; }
 
 function updateCapState(){
-  const total=state.modules.length;
+  const fx=getFxCount();
+  const mods=getModCount();
   const heavy=getHeavyCount();
-  const atTotal=total>=MAX_TOTAL;
+  const atFx=fx>=MAX_FX;
   const atHeavy=heavy>=MAX_HEAVY;
+  const atMods=mods>=MAX_MODS;
 
   document.querySelectorAll('.mitem[data-heavy]').forEach(el=>{
-    el.classList.toggle('cap-locked', atHeavy||atTotal);
+    el.classList.toggle('cap-locked', atHeavy||atFx);
   });
-  document.querySelectorAll('.mitem:not([data-heavy])').forEach(el=>{
+  document.querySelectorAll('.mitem[data-mod]').forEach(el=>{
+    el.classList.toggle('cap-locked', atMods);
+  });
+  document.querySelectorAll('.mitem:not([data-heavy]):not([data-mod])').forEach(el=>{
     if(!el.classList.contains('src-item'))
-      el.classList.toggle('cap-locked', atTotal);
+      el.classList.toggle('cap-locked', atFx);
   });
 
   const stEl=document.getElementById('st');
-  if(atTotal){
-    stEl.textContent='max modules reached';
-    clearTimeout(setStatus._t);
-    setStatus._cap=true;
-  } else if(atHeavy){
-    stEl.textContent='max heavy reached';
+  if(atFx||atHeavy||atMods){
+    stEl.textContent=atFx?'max effects reached ('+MAX_FX+')':atHeavy?'max heavy reached ('+MAX_HEAVY+')':'max modulators reached ('+MAX_MODS+')';
     clearTimeout(setStatus._t);
     setStatus._cap=true;
   } else {
     setStatus._cap=false;
-    if(heavy===1) stEl.textContent='1 heavy active';
-    else stEl.textContent='ready';
+    stEl.textContent=heavy>0?heavy+' heavy active':'ready';
   }
 }
 
@@ -6509,10 +6607,11 @@ let _modSeq=0;
 // fx-key lookup by element id — module ids from bank restore contain '.', which breaks a css selector
 function _fxKeysOf(elId){const el=document.getElementById(elId);return el?el.querySelectorAll('.fx-key'):[];}
 function addModule(name,type,color){
-  const total=state.modules.length;
-  const heavy=getHeavyCount();
-  if(total>=MAX_TOTAL) return;
-  if(HEAVY_MODULES.has(name)&&heavy>=MAX_HEAVY) return;
+  if(type==='modulator'){ if(getModCount()>=MAX_MODS) return; }
+  else{
+    if(getFxCount()>=MAX_FX) return;
+    if(HEAVY_MODULES.has(name)&&getHeavyCount()>=MAX_HEAVY) return;
+  }
 
   // monotonic counter: 'm'+Date.now() collided when two modules were added in the same ms
   const id='mod'+(++_modSeq);
@@ -9436,6 +9535,7 @@ rebuildSlots=function(){if(_bankSwitching)return;_origRebuild();autoSave();};
 </div>
 
 <!-- TUTORIAL -->
+<div id="tut-dim" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg"><path id="tut-dim-path" d=""/><g id="tut-dim-rings"></g></svg></div>
 <div id="tut-card" class="inverse">
   <div class="tc-tabs" id="tc-tabs" role="tablist" aria-label="tutorial chapters">
     <button type="button" class="tc-tab" id="tc-tab-1" data-ch="1" role="tab" aria-selected="false"><span>chapter 1: intro</span></button>
@@ -10480,7 +10580,7 @@ const TUT_STEPS=[
   {
     id:'modulators-are-different', _chapter:3, _chapterLabel:'effects', _concept:true,
     text:"modulators are different. they don't do anything on their own.",
-    action:"they attach to other effects or to the crossfader and drive them automatically. add one, then click SEND TO and assign it to a knob on any processor or glitch effect. pick a wave shape. watch that knob move by itself.\nthat's automation. that's how you make something that performs without you touching it.",
+    action:"they attach to other effects or to the crossfader and drive them automatically. add one right below a processor or glitch effect, then use SEND TO to assign it to a knob on that effect, or to the crossfader. pick a wave shape. watch that knob move by itself.\nthat's automation. that's how you make something that performs without you touching it.",
     illus:`<svg width="220" height="56" viewBox="0 0 220 56" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
       <defs>
         <style>
@@ -10520,7 +10620,7 @@ const TUT_STEPS=[
   {
     id:'modulators-drive-other', _chapter:3, _chapterLabel:'effects',
     text:"modulators drive other effects automatically.",
-    action:"add an oscillator, then use SEND TO to assign it to any knob on another effect. pick a wave. watch the knob move on its own.\n\nadd an oscillator and assign it to a knob.",
+    action:"add an oscillator right below an effect, then use SEND TO to assign it to one of that effect's knobs. pick a wave. watch the knob move on its own.\n\nadd an oscillator and assign it to a knob.",
     confirm:"hands-free. now the machine is performing.",
     complete:()=>state.modules.some(m=>m.name==='LFO'&&m.lfoTarget&&m.lfoTarget.targetId),
     illus:`<svg width="220" height="56" viewBox="0 0 220 56" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -10562,10 +10662,10 @@ const TUT_STEPS=[
   // ch3 slide 7: build to 5
   {
     id:'the-chain-supports', _chapter:3, _chapterLabel:'effects',
-    text:"the chain supports up to 5 effects.",
-    action:"some are marked HEAVY. they cost more to run. the FPS counter is in the bottom bar. if it drops below 15, remove a heavy effect and watch it recover.\n\nstack effects until you hit 5.",
-    confirm:"picking which 5 effects is now a mini game.",
-    complete:()=>state._tutFpsWarning||state.modules.length>=5,
+    text:"the chain holds up to 10 effects.",
+    action:"modulators don't count toward that. some effects are marked HEAVY: they cost more to run, so you get 3 of those. the FPS counter is in the bottom bar. if it drops below 15, remove a heavy effect and watch it recover.\n\nstack 5 effects.",
+    confirm:"keep stacking if you want. picking which heavy 3 is the mini game now.",
+    complete:()=>state._tutFpsWarning||getFxCount()>=5,
     illus:`<svg width="220" height="80" viewBox="0 0 220 80" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
       <rect x="2" y="2" width="140" height="12" class="tut-pop" style="--del:0s;--dur:0.15s" fill="var(--ink)"/>
       <text x="6" y="11" class="tut-rise" style="--del:0.05s" font-family="monospace" font-size="7" fill="var(--paper)">COLOR</text>
@@ -11131,7 +11231,7 @@ function startTutorial(){
   if(document.body.classList.contains('tv')){setStatus('tutorial needs the desktop layout — switch back to hd first');return;}
   // already running: just bring the card back (a second start orphaned the
   // 400ms check interval and stacked listeners)
-  if(_ta){const tc=document.getElementById('tut-card');if(tc)tc.style.display='block';return;}
+  if(_ta){const tc=document.getElementById('tut-card');if(tc)tc.style.display='block';_tutLayout(true);return;}
   // if already completed, enter review mode — all steps are freely skippable
   try{_tutReviewMode=!!localStorage.getItem('morph_tut_done');}catch(e){_tutReviewMode=false;}
   // resume where left off if in progress, otherwise start fresh
@@ -11147,19 +11247,7 @@ function startTutorial(){
   const tutCard=document.getElementById('tut-card');
   tutCard.style.display='block';
   _showTS(_ts);
-  requestAnimationFrame(()=>{requestAnimationFrame(()=>{
-    const centerArea=document.querySelector('.center');
-    if(centerArea){
-      const appZoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1;
-      const cardZoom=parseFloat(getComputedStyle(tutCard).zoom)||1;
-      const totalZoom=appZoom*cardZoom;
-      const r=centerArea.getBoundingClientRect();
-      const cx=(r.left+r.right)/2/totalZoom;
-      tutCard.style.transform='none';
-      tutCard.style.left=(cx-tutCard.offsetWidth/2)+'px';
-      tutCard.style.top=(r.top/totalZoom)+'px';
-    }
-  });});
+  _tutWatch(true);
   clearInterval(_tp);
   _tp=setInterval(_checkTS,400);
   // low-fps watch only while the tutorial runs (it used to poll from page load)
@@ -11181,6 +11269,7 @@ function startTutorial(){
 function _tutStop(){
   _ta=false;
   document.getElementById('tut-card').style.display='none';
+  _tutWatch(false);
   const sm=document.getElementById('skip-modal');if(sm)sm.style.display='none';
   clearInterval(_tp);_tp=null;
   clearInterval(_tutFpsIv);_tutFpsIv=null;
@@ -11274,6 +11363,7 @@ function _prevTS(){
 }
 
 function _checkTS(){
+  if(_ta) _tutLayout(false);
   if(!_ta||_tsReady)return;
   const s=TUT_STEPS[_ts];
   if(!s)return;
@@ -11470,6 +11560,184 @@ function _showTS(i){
     if(exploreBtn) exploreBtn.style.display='none';
     if(skipBtn){skipBtn.textContent='skip tutorial';skipBtn.style.display='block';skipBtn.style.marginLeft='auto';}
   }
+  _tutFocusStep(s);
+}
+
+/* ── TUTORIAL SPOTLIGHT ──
+   Each step names the parts of the UI it talks about. Everything else is
+   dimmed, and the card is placed next to the focus without covering it.
+   A string selector gives one hole per matched element; {u:'sel'} unions all
+   matches into one hole (a list section). Steps without an entry dim the
+   whole app and centre the card. */
+const TUT_FOCUS={
+  'three-things-to':['#left-sources','.right','.bot-l'],
+  'first-give-it':['#left-sources','#source-nodes'],
+  'input-a-is':['#left-sources','#src-node-a'],
+  'now-fill-input':['#left-sources','#src-node-b'],
+  'every-source-comes':['#src-a-controls','#src-b-controls'],
+  'sources-are-swappable':['#src-replace-b','#left-sources'],
+  'loaded-them-in':['#left-previews'],
+  'the-right-panel':['.right'],
+  'lets-start-with':[{u:'#proc-sec-lbl, #glitch-sec-lbl, .mod-list .mitem:not([data-mod])'},'#mod-slots .node'],
+  'every-effect-has':['#mod-slots .node'],
+  'the-eye-icon':['#mod-slots .bypass-btn','#mod-slots .node-thumb'],
+  'modulators-are-different':[{u:'#mod-sec-lbl, .mod-list [data-mod]'}],
+  'modulators-drive-other':[{u:'#mod-sec-lbl, .mod-list [data-mod]'},'#mod-slots .node'],
+  'the-chain-supports':['.right','#mod-slots','#fps-big'],
+  'order-changes-everything':['#mod-slots .node-head'],
+  'the-crossfader-is':['.mixer-node','.mxf-wrap'],
+  'a-quick-orientation':['.master-node','.bot-l','#btn-pip','#btn-out'],
+  'your-audience-sees':['#btn-out'],
+  'capture-saves-your':['#capture-open-btn'],
+  'two-switches-in':['#btn-theme','#btn-crt'],
+  'hover-over-anything':['#helper'],
+  'thats-everything':['#btn-tutorial'],
+};
+const TUT_PAD=6, TUT_GAP=14, TUT_EDGE=8, TUT_ZOOMS=[1.5,1.35,1.2,1.05,0.95,0.85,0.75];
+
+function _tutVisible(el){
+  if(!el.getClientRects().length) return false;
+  const cs=getComputedStyle(el);
+  return cs.visibility!=='hidden'&&cs.display!=='none';
+}
+// element rect clipped by every scrolling/clipping ancestor and the viewport
+function _tutClipRect(el){
+  const r=el.getBoundingClientRect();
+  let x0=r.left,y0=r.top,x1=r.right,y1=r.bottom;
+  for(let p=el.parentElement;p&&p!==document.body;p=p.parentElement){
+    const cs=getComputedStyle(p);
+    if(cs.overflowX!=='visible'||cs.overflowY!=='visible'){
+      const q=p.getBoundingClientRect();
+      x0=Math.max(x0,q.left);y0=Math.max(y0,q.top);x1=Math.min(x1,q.right);y1=Math.min(y1,q.bottom);
+    }
+  }
+  x0=Math.max(x0,0);y0=Math.max(y0,0);x1=Math.min(x1,innerWidth);y1=Math.min(y1,innerHeight);
+  return x1-x0>2&&y1-y0>2?{x0,y0,x1,y1}:null;
+}
+function _tutFocusRects(step){
+  const out=[];
+  (TUT_FOCUS[step&&step.id]||[]).forEach(f=>{
+    const union=typeof f==='object';
+    const els=[...document.querySelectorAll(union?f.u:f)].filter(_tutVisible);
+    const rs=els.map(_tutClipRect).filter(Boolean);
+    if(!rs.length) return;
+    const pad=r=>({x0:Math.max(0,r.x0-TUT_PAD),y0:Math.max(0,r.y0-TUT_PAD),x1:Math.min(innerWidth,r.x1+TUT_PAD),y1:Math.min(innerHeight,r.y1+TUT_PAD)});
+    if(union) out.push(pad(rs.reduce((a,r)=>({x0:Math.min(a.x0,r.x0),y0:Math.min(a.y0,r.y0),x1:Math.max(a.x1,r.x1),y1:Math.max(a.y1,r.y1)}))));
+    else rs.forEach(r=>out.push(pad(r)));
+  });
+  return out;
+}
+function _tutDrawDim(rects){
+  const w=innerWidth,h=innerHeight;
+  let d=`M0 0H${w}V${h}H0Z`;
+  let rings='';
+  rects.forEach(r=>{
+    const x=Math.round(r.x0),y=Math.round(r.y0),rw=Math.round(r.x1-r.x0),rh=Math.round(r.y1-r.y0);
+    d+=`M${x} ${y}h${rw}v${rh}h${-rw}Z`;
+    rings+=`<rect x="${x+1}" y="${y+1}" width="${rw-2}" height="${rh-2}"/>`;
+  });
+  const svg=document.querySelector('#tut-dim svg');
+  svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
+  document.getElementById('tut-dim-path').setAttribute('d',d);
+  document.getElementById('tut-dim-rings').innerHTML=rings;
+}
+const _tutHit=(a,rects,gap)=>rects.some(r=>a.x0<r.x1+gap&&a.x1>r.x0-gap&&a.y0<r.y1+gap&&a.y1>r.y0-gap);
+const _tutInView=a=>a.x0>=TUT_EDGE-1&&a.y0>=TUT_EDGE-1&&a.x1<=innerWidth-TUT_EDGE+1&&a.y1<=innerHeight-TUT_EDGE+1;
+// best card position (in viewport px) for card size W×H: free of every focus
+// rect, as close to the focus as possible
+function _tutBestSpot(W,H,rects,allowOverlap){
+  const vw=innerWidth,vh=innerHeight;
+  if(W>vw-2*TUT_EDGE||H>vh-2*TUT_EDGE) return null;
+  if(!rects.length) return {x:(vw-W)/2,y:(vh-H)/2};
+  const U=rects.reduce((a,r)=>({x0:Math.min(a.x0,r.x0),y0:Math.min(a.y0,r.y0),x1:Math.max(a.x1,r.x1),y1:Math.max(a.y1,r.y1)}));
+  const ucx=(U.x0+U.x1)/2,ucy=(U.y0+U.y1)/2;
+  let best=null,bestScore=Infinity;
+  const step=12,xs=[],ys=[];
+  for(let x=TUT_EDGE;x<=vw-W-TUT_EDGE;x+=step) xs.push(x);
+  for(let y=TUT_EDGE;y<=vh-H-TUT_EDGE;y+=step) ys.push(y);
+  xs.push(vw-W-TUT_EDGE);ys.push(vh-H-TUT_EDGE);
+  // also try flush against each focus rect's edges
+  rects.forEach(r=>{xs.push(r.x1+TUT_GAP,r.x0-TUT_GAP-W);ys.push(r.y1+TUT_GAP,r.y0-TUT_GAP-H);});
+  for(const x of xs){
+    if(x<TUT_EDGE||x>vw-W-TUT_EDGE) continue;
+    for(const y of ys){
+      if(y<TUT_EDGE||y>vh-H-TUT_EDGE) continue;
+      const a={x0:x,y0:y,x1:x+W,y1:y+H};
+      let over=0;
+      if(_tutHit(a,rects,TUT_GAP)){
+        if(!allowOverlap) continue;
+        rects.forEach(r=>{over+=Math.max(0,Math.min(a.x1,r.x1+TUT_GAP)-Math.max(a.x0,r.x0-TUT_GAP))*Math.max(0,Math.min(a.y1,r.y1+TUT_GAP)-Math.max(a.y0,r.y0-TUT_GAP));});
+      }
+      // edge gap to the focus union, centre distance as a tie-break
+      const gx=Math.max(0,U.x0-a.x1,a.x0-U.x1),gy=Math.max(0,U.y0-a.y1,a.y0-U.y1);
+      const score=over*1000+Math.hypot(gx,gy)+0.05*Math.hypot(x+W/2-ucx,y+H/2-ucy);
+      if(score<bestScore){bestScore=score;best={x,y};}
+    }
+  }
+  return best;
+}
+function _tutPlaceCard(card,x,y,z){
+  const appZoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1;
+  card.style.zoom=z;
+  card.style.transform='none';card.style.bottom='auto';
+  card.style.left=(x/(appZoom*z))+'px';
+  card.style.top=(y/(appZoom*z))+'px';
+}
+// force: new step / resize — re-place the card from scratch. otherwise the card
+// only moves when it now overlaps the focus or falls off screen (content grew)
+function _tutLayout(force){
+  const card=document.getElementById('tut-card'),dim=document.getElementById('tut-dim');
+  if(!_ta||!card||card.style.display==='none'){if(dim)dim.style.display='none';return;}
+  const step=TUT_STEPS[_ts];
+  const rects=_tutFocusRects(step);
+  dim.style.display='block';
+  _tutDrawDim(rects);
+  const cr=card.getBoundingClientRect();
+  const cur={x0:cr.left,y0:cr.top,x1:cr.right,y1:cr.bottom};
+  if(card._tutManual&&!force) return;
+  if(!force&&!_tutHit(cur,rects,TUT_GAP-2)&&_tutInView(cur)) return;
+  const z0=parseFloat(card.style.zoom)||parseFloat(getComputedStyle(card).zoom)||1.5;
+  const bw=cr.width/z0,bh=cr.height/z0;   // card size at zoom 1
+  let pick=null;
+  for(const z of TUT_ZOOMS){
+    const spot=_tutBestSpot(bw*z,bh*z,rects);
+    if(spot){pick={...spot,z};break;}
+  }
+  if(!pick){
+    // nothing fits clear of the focus (small screens): smallest card, placed
+    // where it covers the least of it
+    const z=TUT_ZOOMS[TUT_ZOOMS.length-1];
+    const spot=_tutBestSpot(bw*z,bh*z,rects,true);
+    pick=spot?{...spot,z}:{x:Math.max(TUT_EDGE,innerWidth-bw*z-TUT_EDGE),y:TUT_EDGE,z};
+  }
+  _tutPlaceCard(card,pick.x,pick.y,pick.z);
+}
+function _tutFocusStep(step){
+  const card=document.getElementById('tut-card');
+  if(card) card._tutManual=false;
+  // scroll the first focus target that's scrolled out of view (chain nodes) in
+  for(const f of TUT_FOCUS[step&&step.id]||[]){
+    const el=[...document.querySelectorAll(typeof f==='object'?f.u:f)].find(_tutVisible);
+    if(el&&!_tutClipRect(el)){el.scrollIntoView({block:'nearest',behavior:'smooth'});break;}
+  }
+  requestAnimationFrame(()=>_tutLayout(true));
+}
+let _tutRaf=0;
+function _tutOnViewChange(e){
+  if(_tutRaf) return;
+  _tutRaf=requestAnimationFrame(()=>{_tutRaf=0;_tutLayout(e&&e.type==='resize');});
+}
+let _tutRO=null;
+function _tutWatch(on){
+  window.removeEventListener('resize',_tutOnViewChange);
+  window.removeEventListener('scroll',_tutOnViewChange,true);
+  if(_tutRO){_tutRO.disconnect();_tutRO=null;}
+  const dim=document.getElementById('tut-dim');
+  if(!on){if(dim)dim.style.display='none';return;}
+  window.addEventListener('resize',_tutOnViewChange);
+  window.addEventListener('scroll',_tutOnViewChange,true);
+  // the card grows when the confirm line / buttons appear
+  if(window.ResizeObserver){_tutRO=new ResizeObserver(()=>_tutOnViewChange());_tutRO.observe(document.getElementById('tut-card'));}
 }
 
 function _makeDraggable(el){
@@ -11488,7 +11756,7 @@ function _makeDraggable(el){
     el.style.transform='none';el.style.bottom='auto';
     el.style.left=ox+'px';el.style.top=oy+'px';
     sx=e.clientX/totalZoom;sy=e.clientY/totalZoom;
-    drag=true;el.style.cursor='grabbing';
+    drag=true;el.style.cursor='grabbing';el._tutManual=true;
     e.preventDefault();
   });
   document.addEventListener('mousemove',e=>{

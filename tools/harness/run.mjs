@@ -235,6 +235,21 @@ if (only.includes('smoke')) {
     __h.add('feedback', 'processor'); __h.add('pixelsort', 'glitch'); __h.frames(10);
     const st = __h.outputStats(); if (st.nonBlack < 0.05) throw new Error('output is black: ' + JSON.stringify(st));
   }));
+  await step('caps', () => page.evaluate(() => {
+    const fx = () => state.modules.filter((m) => m.type !== 'modulator').length;
+    const mods = () => state.modules.filter((m) => m.type === 'modulator').length;
+    __h.clearModules();
+    ['ascii', 'signalnoise', 'datamosh', 'pixelsort'].forEach((n) => __h.add(n, n === 'ascii' ? 'processor' : 'glitch'));
+    if (fx() !== MAX_HEAVY) throw new Error('heavy cap: got ' + fx() + ', want ' + MAX_HEAVY);
+    for (let i = 0; i < 12; i++) __h.add(['color', 'geometry', 'vhs', 'rowshift'][i % 4], i % 4 < 2 ? 'processor' : 'glitch');
+    if (fx() !== MAX_FX) throw new Error('fx cap: got ' + fx() + ', want ' + MAX_FX);
+    for (let i = 0; i < 8; i++) __h.add('LFO', 'modulator');
+    if (mods() !== MAX_MODS) throw new Error('modulator cap: got ' + mods() + ', want ' + MAX_MODS);
+    if (fx() !== MAX_FX) throw new Error('modulators changed the fx count');
+    __h.frames(10);
+    const st = __h.outputStats(); if (st.nonBlack < 0.05) throw new Error('output is black at max chain: ' + JSON.stringify(st));
+    __h.clearModules();
+  }));
   await step('output-window', async () => {
     const [popup] = await Promise.all([context.waitForEvent('page', { timeout: 5000 }), page.evaluate(() => openOutput())]);
     await popup.waitForLoadState();
@@ -318,6 +333,30 @@ if (only.includes('bench')) {
   await scenario('GL-only chain x4 (color, geometry, vhs, rowshift)', () => page.evaluate(() => {
     startPickMode('A'); pickSource('color');
     __h.add('color', 'processor'); __h.add('geometry', 'processor'); __h.add('vhs', 'glitch'); __h.add('rowshift', 'glitch');
+  }));
+  const tenFx = (heavy) => page.evaluate((heavy) => {
+    startPickMode('A'); pickSource('pattern'); sources.A.genParam = { preset: 0, speed: 0.5 };
+    startPickMode('B'); pickSource('math'); sources.B.genParam = { preset: 0, speed: 0.5 };
+    const fx = (n, t, mode) => { const m = __h.add(n, t); if (mode != null) try { setFx(m.id, mode); } catch (e) {} };
+    const light = [['color', 'processor'], ['geometry', 'processor', 3], ['keyer', 'processor'], ['feedback', 'processor'],
+      ['pixelops', 'processor', 6], ['vhs', 'glitch', 7], ['rowshift', 'glitch'], ['color', 'processor', 5], ['geometry', 'processor'], ['vhs', 'glitch']];
+    light.slice(0, 10 - heavy.length).forEach((a) => fx(...a));
+    heavy.forEach((a) => fx(...a));
+    __h.add('LFO', 'modulator'); __h.add('perlin', 'modulator');
+  }, heavy);
+  await scenario('10 fx, no heavy + 2 mods', () => tenFx([]));
+  await scenario('10 fx, 1 heavy (pixelsort default) + 2 mods', () => tenFx([['pixelsort', 'glitch']]));
+  await scenario('10 fx, 3 heavy default modes + 2 mods', () => tenFx([['pixelsort', 'glitch'], ['signalnoise', 'glitch'], ['ascii', 'processor', 1]]));
+  // the new ceiling: 10 effects with 3 heavy in their worst modes, plus 2 modulators
+  await scenario('max chain (10 fx incl. pixelsort, signalnoise, ascii + 2 mods)', () => page.evaluate(() => {
+    startPickMode('A'); pickSource('pattern'); sources.A.genParam = { preset: 0, speed: 0.5 };
+    startPickMode('B'); pickSource('math'); sources.B.genParam = { preset: 0, speed: 0.5 };
+    const fx = (n, t, mode) => { const m = __h.add(n, t); if (mode != null) try { setFx(m.id, mode); } catch (e) {} };
+    fx('color', 'processor'); fx('geometry', 'processor', 3); fx('keyer', 'processor'); fx('feedback', 'processor');
+    fx('pixelops', 'processor', 6); fx('vhs', 'glitch', 7); fx('rowshift', 'glitch');
+    fx('pixelsort', 'glitch', 7); fx('signalnoise', 'glitch', 6); fx('ascii', 'processor', 0);
+    __h.add('LFO', 'modulator'); __h.add('perlin', 'modulator');
+    if (state.modules.length !== 12) throw new Error('max chain built ' + state.modules.length + ' modules');
   }));
   await page.close();
 }
