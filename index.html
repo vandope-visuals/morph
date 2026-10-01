@@ -3900,20 +3900,22 @@ function setXfade(v){
 })();
 
 /* ── COLOR EFFECTS ENGINE ── */
+const _c3=[0,0,0],_h3=[0,0,0]; // scratch for the allocation-free color helpers below
 const COLOR_FX = [
-  { id:'lut',   label:['LUT',''],            param:'preset',  run:(d,len,t,p)=>{ const li=Math.floor(p*3); for(let i=0;i<len;i+=4){ const[r,g,b]=applyLut(d[i],d[i+1],d[i+2],li); d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
-  { id:'sat',   label:['satu','ration'],      param:'amount',  run:(d,len,t,p)=>{ for(let i=0;i<len;i+=4){ const[h,s,l]=rgb2hsl(d[i],d[i+1],d[i+2]); const[r,g,b]=hsl2rgb(h,p,l); d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
+  { id:'lut',   label:['LUT',''],            param:'preset',  run:(d,len,t,p)=>{ const li=Math.floor(p*3); for(let i=0;i<len;i+=4){ const r0=d[i],g0=d[i+1],b0=d[i+2]; let r,g,b; if(li===0){r=255-r0;g=255-g0;b=255-b0;}else{const l=r0*0.299+g0*0.587+b0*0.114; if(li===1){r=Math.min(255,l*1.2);g=Math.min(255,l*0.9);b=Math.min(255,l*0.6);}else{r=Math.min(255,l*0.6);g=Math.min(255,l*1.1);b=Math.min(255,l*1.4);}} d[i]=lerp(r0,r,t);d[i+1]=lerp(g0,g,t);d[i+2]=lerp(b0,b,t); } }},
+  { id:'sat',   label:['satu','ration'],      param:'amount',  run:(d,len,t,p)=>{ const o=_c3,h3=_h3; for(let i=0;i<len;i+=4){ rgb2hslTo(d[i],d[i+1],d[i+2],h3); hsl2rgbTo(h3[0],p,h3[2],o); d[i]=lerp(d[i],o[0],t);d[i+1]=lerp(d[i+1],o[1],t);d[i+2]=lerp(d[i+2],o[2],t); } }},
   { id:'chan',  label:['channel','remap'],    param:'mode',    run:(d,len,t,p)=>{ const m=Math.floor(p*5); for(let i=0;i<len;i+=4){ let r=d[i],g=d[i+1],b=d[i+2]; let nr,ng,nb; if(m===0){nr=g;ng=b;nb=r;}else if(m===1){nr=b;ng=r;nb=g;}else if(m===2){nr=255-r;ng=g;nb=b;}else if(m===3){nr=r;ng=255-g;nb=b;}else{nr=255-r;ng=255-g;nb=255-b;} d[i]=lerp(r,nr,t);d[i+1]=lerp(g,ng,t);d[i+2]=lerp(b,nb,t); } }},
-  { id:'duo',   label:['duo','tone'],         param:'hue',     run:(d,len,t,p)=>{ const[cr,cg,cb]=hsl2rgb(p*360,1,0.5); for(let i=0;i<len;i+=4){ const lum=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114)/255; const r=lum*cr; const g=lum*cg; const b=lum*cb; d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
-  { id:'hue',   label:['hue','rotate'],       param:'hue°',    run:(d,len,t,p)=>{ for(let i=0;i<len;i+=4){ const[h,s,l]=rgb2hsl(d[i],d[i+1],d[i+2]); const[r,g,b]=hsl2rgb((h+p*360)%360,s,l); d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
-  { id:'false', label:['false','color'],      param:'palette', run:(d,len,t,p)=>{ const pi=Math.floor(p*4); for(let i=0;i<len;i+=4){ const lum=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114)/255; const[r,g,b]=falseColor(lum,pi); d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
+  { id:'duo',   label:['duo','tone'],         param:'hue',     run:(d,len,t,p)=>{ const c=hsl2rgbTo(p*360,1,0.5,_c3),cr=c[0],cg=c[1],cb=c[2]; for(let i=0;i<len;i+=4){ const lum=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114)/255; d[i]=lerp(d[i],lum*cr,t);d[i+1]=lerp(d[i+1],lum*cg,t);d[i+2]=lerp(d[i+2],lum*cb,t); } }},
+  { id:'hue',   label:['hue','rotate'],       param:'hue°',    run:(d,len,t,p)=>{ const o=_c3,h3=_h3; for(let i=0;i<len;i+=4){ rgb2hslTo(d[i],d[i+1],d[i+2],h3); hsl2rgbTo((h3[0]+p*360)%360,h3[1],h3[2],o); d[i]=lerp(d[i],o[0],t);d[i+1]=lerp(d[i+1],o[1],t);d[i+2]=lerp(d[i+2],o[2],t); } }},
+  { id:'false', label:['false','color'],      param:'palette', run:(d,len,t,p)=>{ const pi=Math.floor(p*4),o=_c3; for(let i=0;i<len;i+=4){ const lum=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114)/255; falseColorTo(lum,pi,o); d[i]=lerp(d[i],o[0],t);d[i+1]=lerp(d[i+1],o[1],t);d[i+2]=lerp(d[i+2],o[2],t); } }},
   { id:'pal',   label:['palette','reduce'],   param:'depth',   run:(d,len,t,p)=>{ const steps=Math.max(2,Math.round(2+(1-p)*30)); const q=255/(steps-1); for(let i=0;i<len;i+=4){ const r=Math.round(d[i]/q)*q; const g=Math.round(d[i+1]/q)*q; const b=Math.round(d[i+2]/q)*q; d[i]=lerp(d[i],r,t);d[i+1]=lerp(d[i+1],g,t);d[i+2]=lerp(d[i+2],b,t); } }},
-  { id:'cfb',   label:['color','trails'],     param:'decay',   run:(d,len,t,p)=>{ if(!cfbBuf||cfbBuf.length!==len){cfbBuf=new Uint8ClampedArray(len); for(let i=0;i<len;i++)cfbBuf[i]=d[i];} const decay=0.5+p*0.49; for(let i=0;i<len;i+=4){ cfbBuf[i]  =Math.round(cfbBuf[i]  *decay); cfbBuf[i+1]=Math.round(cfbBuf[i+1]*decay); cfbBuf[i+2]=Math.round(cfbBuf[i+2]*decay); cfbBuf[i+3]=255; if(d[i]>cfbBuf[i])   cfbBuf[i]  =d[i]; if(d[i+1]>cfbBuf[i+1])cfbBuf[i+1]=d[i+1]; if(d[i+2]>cfbBuf[i+2])cfbBuf[i+2]=d[i+2]; d[i]=lerp(d[i],cfbBuf[i],t); d[i+1]=lerp(d[i+1],cfbBuf[i+1],t); d[i+2]=lerp(d[i+2],cfbBuf[i+2],t); } }}
+  { id:'cfb',   label:['color','trails'],     param:'decay',   run:null } // stateful: handled in processColorModule
 ];
 
 function lerp(a,b,t){return Math.round(a+(b-a)*t);}
 
-function rgb2hsl(r,g,b){
+// allocation-free variants write into o (h in degrees); rgb2hsl/hsl2rgb keep their array-returning api
+function rgb2hslTo(r,g,b,o){
   r/=255;g/=255;b/=255;
   const max=Math.max(r,g,b),min=Math.min(r,g,b);
   let h,s,l=(max+min)/2;
@@ -3922,27 +3924,40 @@ function rgb2hsl(r,g,b){
     switch(max){case r:h=(g-b)/d+(g<b?6:0);break;case g:h=(b-r)/d+2;break;default:h=(r-g)/d+4;}
     h/=6;
   }
-  return[h*360,s,l];
+  o[0]=h*360;o[1]=s;o[2]=l;return o;
 }
-function hsl2rgb(h,s,l){
+function _hue2rgb(p,q,t){if(t<0)t+=1;if(t>1)t-=1;if(t<1/6)return p+(q-p)*6*t;if(t<1/2)return q;if(t<2/3)return p+(q-p)*(2/3-t)*6;return p;}
+function hsl2rgbTo(h,s,l,o){
   h/=360;
-  if(s===0){const v=Math.round(l*255);return[v,v,v];}
+  if(s===0){const v=Math.round(l*255);o[0]=o[1]=o[2]=v;return o;}
   const q=l<0.5?l*(1+s):l+s-l*s,p=2*l-q;
-  const hue2rgb=(p,q,t)=>{if(t<0)t+=1;if(t>1)t-=1;if(t<1/6)return p+(q-p)*6*t;if(t<1/2)return q;if(t<2/3)return p+(q-p)*(2/3-t)*6;return p;};
-  return[Math.round(hue2rgb(p,q,h+1/3)*255),Math.round(hue2rgb(p,q,h)*255),Math.round(hue2rgb(p,q,h-1/3)*255)];
+  o[0]=Math.round(_hue2rgb(p,q,h+1/3)*255);o[1]=Math.round(_hue2rgb(p,q,h)*255);o[2]=Math.round(_hue2rgb(p,q,h-1/3)*255);
+  return o;
 }
-function falseColor(t,p){
-  const palettes=[
-    [[0,0,128],[0,128,255],[0,255,128],[255,255,0],[255,0,0]],
-    [[0,0,0],[128,0,128],[255,0,255],[255,128,0],[255,255,255]],
-    [[0,64,0],[0,160,0],[128,255,0],[255,255,128],[255,255,255]],
-    [[20,20,20],[60,0,80],[180,0,120],[255,80,0],[255,220,100]]
-  ];
-  const pal=palettes[p%palettes.length];
+function rgb2hsl(r,g,b){return rgb2hslTo(r,g,b,[0,0,0]);}
+function hsl2rgb(h,s,l){return hsl2rgbTo(h,s,l,[0,0,0]);}
+// hue in degrees only (keyer), same math as rgb2hsl
+function _rgbHue(r,g,b){
+  const max=Math.max(r,g,b),min=Math.min(r,g,b);
+  if(max===min) return 0;
+  const d=max-min;let h;
+  if(max===r)h=(g-b)/d+(g<b?6:0);else if(max===g)h=(b-r)/d+2;else h=(r-g)/d+4;
+  return h*60;
+}
+const _FC_PAL=[
+  [[0,0,128],[0,128,255],[0,255,128],[255,255,0],[255,0,0]],
+  [[0,0,0],[128,0,128],[255,0,255],[255,128,0],[255,255,255]],
+  [[0,64,0],[0,160,0],[128,255,0],[255,255,128],[255,255,255]],
+  [[20,20,20],[60,0,80],[180,0,120],[255,80,0],[255,220,100]]
+];
+function falseColorTo(t,p,o){
+  const pal=_FC_PAL[p%_FC_PAL.length];
   const s=t*(pal.length-1),i=Math.floor(s),f=s-i;
   const a=pal[Math.min(i,pal.length-1)],b=pal[Math.min(i+1,pal.length-1)];
-  return[Math.round(a[0]+(b[0]-a[0])*f),Math.round(a[1]+(b[1]-a[1])*f),Math.round(a[2]+(b[2]-a[2])*f)];
+  o[0]=Math.round(a[0]+(b[0]-a[0])*f);o[1]=Math.round(a[1]+(b[1]-a[1])*f);o[2]=Math.round(a[2]+(b[2]-a[2])*f);
+  return o;
 }
+function falseColor(t,p){return falseColorTo(t,p,[0,0,0]);}
 function applyLut(r,g,b,preset){
   if(preset===0){return[255-r,255-g,255-b];}
   if(preset===1){const l=(r*0.299+g*0.587+b*0.114);return[Math.min(255,l*1.2),Math.min(255,l*0.9),Math.min(255,l*0.6)];}
@@ -3951,48 +3966,47 @@ function applyLut(r,g,b,preset){
 
 function processColorModule(mod, srcCanvas){
   const fx=COLOR_FX[mod.activeFx];
-  if(!fx||mod.intensity===0){
-    if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
-    mod.offCtx.drawImage(srcCanvas,0,0,W,H);
-    return mod.offscreen;
-  }
-  // GL paths
-  const GL_MAP={hue:'hue',sat:'sat',false:'false_color',pal:'palette',chan:'channel',duo:'duo',lut:'lut'};
-  if(GL_MAP[fx.id] && GLProcessor.ready()){
-    const extra=(fx.id==='false')?null:null;
-    const r=GLProcessor.run(GL_MAP[fx.id],mod,srcCanvas,extra);
+  const cg=mod.channelGain,gain=!!cg&&((cg.r??1)!==1||(cg.g??1)!==1||(cg.b??1)!==1);
+  if((!fx||mod.intensity===0)&&!gain) return srcCanvas; // pass-through (was a full copy)
+  // GL paths (gain applied in-shader via u_gain)
+  const GL_MAP={hue:'hue',sat:'sat',false:'false_color',pal:'palette',chan:'channel',duo:'duo',lut:'lut',cfb:'cfb'};
+  if(GLProcessor.ready()){
+    const r=GLProcessor.run((!fx||mod.intensity===0)?'cgain':GL_MAP[fx.id],mod,srcCanvas);
     if(r) return r;
   }
-  // CPU fallback (cfb + GL failure)
+  // CPU fallback
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
+  mod.offCtx.clearRect(0,0,W,H);
   mod.offCtx.drawImage(srcCanvas,0,0,W,H);
   const imgData=mod.offCtx.getImageData(0,0,W,H);
-  if(fx.id==='cfb'){
+  if(!fx||mod.intensity===0){
+    // gain only
+  } else if(fx.id==='cfb'){
     // color trails — uses per-module persistent buffer instead of shared singleton
     const d=imgData.data, len=d.length;
     if(!mod._cfbBuf||mod._cfbBuf.length!==len){mod._cfbBuf=new Uint8ClampedArray(len);for(let i=0;i<len;i++)mod._cfbBuf[i]=d[i];}
-    const decay=0.5+mod.param*0.49;
+    const decay=0.5+mod.param*0.49,b=mod._cfbBuf,t=mod.intensity;
     for(let i=0;i<len;i+=4){
-      mod._cfbBuf[i]  =Math.round(mod._cfbBuf[i]  *decay);
-      mod._cfbBuf[i+1]=Math.round(mod._cfbBuf[i+1]*decay);
-      mod._cfbBuf[i+2]=Math.round(mod._cfbBuf[i+2]*decay);
-      mod._cfbBuf[i+3]=255;
-      if(d[i]  >mod._cfbBuf[i])   mod._cfbBuf[i]  =d[i];
-      if(d[i+1]>mod._cfbBuf[i+1]) mod._cfbBuf[i+1]=d[i+1];
-      if(d[i+2]>mod._cfbBuf[i+2]) mod._cfbBuf[i+2]=d[i+2];
-      d[i]  =Math.round(d[i]  +(mod._cfbBuf[i]  -d[i]  )*mod.intensity);
-      d[i+1]=Math.round(d[i+1]+(mod._cfbBuf[i+1]-d[i+1])*mod.intensity);
-      d[i+2]=Math.round(d[i+2]+(mod._cfbBuf[i+2]-d[i+2])*mod.intensity);
+      b[i]  =Math.round(b[i]  *decay);
+      b[i+1]=Math.round(b[i+1]*decay);
+      b[i+2]=Math.round(b[i+2]*decay);
+      b[i+3]=255;
+      if(d[i]  >b[i])   b[i]  =d[i];
+      if(d[i+1]>b[i+1]) b[i+1]=d[i+1];
+      if(d[i+2]>b[i+2]) b[i+2]=d[i+2];
+      d[i]  =Math.round(d[i]  +(b[i]  -d[i]  )*t);
+      d[i+1]=Math.round(d[i+1]+(b[i+1]-d[i+1])*t);
+      d[i+2]=Math.round(d[i+2]+(b[i+2]-d[i+2])*t);
     }
   } else {
     fx.run(imgData.data,imgData.data.length,mod.intensity,mod.param);
   }
-  if(mod.channelGain){
-    const d=imgData.data,cg=mod.channelGain;
+  if(gain){
+    const d=imgData.data,gr=cg.r??1,gg=cg.g??1,gb=cg.b??1;
     for(let i=0;i<d.length;i+=4){
-      d[i]=Math.min(255,d[i]*(cg.r??1));
-      d[i+1]=Math.min(255,d[i+1]*(cg.g??1));
-      d[i+2]=Math.min(255,d[i+2]*(cg.b??1));
+      d[i]=Math.min(255,d[i]*gr);
+      d[i+1]=Math.min(255,d[i+1]*gg);
+      d[i+2]=Math.min(255,d[i+2]*gb);
     }
   }
   mod.offCtx.putImageData(imgData,0,0);
