@@ -2715,6 +2715,14 @@ function drawEmptySourceB(cv){
    CPU fallback only for stateful cross-frame effects.
    ═══════════════════════════════════════════════════════════════ */
 /* ── CUSTOM SELECT HELPER ── */
+// one shared outside-click closer for every custom select (was one document listener per build, never removed)
+let _cselBound=false;
+function _cselBindOutside(){
+  if(_cselBound) return; _cselBound=true;
+  document.addEventListener('click', e=>{
+    document.querySelectorAll('.csel-dropdown.open').forEach(dd=>{ if(!dd.contains(e.target)) dd.classList.remove('open'); });
+  });
+}
 function buildCustomSelect(id, opts, currentVal, onChange){
   const wrap = document.createElement('div');
   wrap.className = 'csel-wrap';
@@ -2777,11 +2785,7 @@ function buildCustomSelect(id, opts, currentVal, onChange){
     }
   });
 
-  document.addEventListener('click', e=>{
-    if(!dd.contains(e.target) && e.target!==btn){
-      dd.classList.remove('open');
-    }
-  });
+  _cselBindOutside();
 
   wrap.dataset.value = currentVal || '';
   wrap.appendChild(btn);
@@ -3814,7 +3818,9 @@ document.addEventListener('keydown',e=>{
 });
 
 
-function setXfade(v){
+// fromMod: modulation-driven (every frame) — skip when unchanged and don't flash the MIDI dot
+function setXfade(v,fromMod){
+  if(fromMod&&v===state.xfade) return;
   state.xfade=v;
   const p=v+'%';
   document.getElementById('mxf-v').textContent=p;
@@ -3822,7 +3828,7 @@ function setXfade(v){
   document.getElementById('xf-thumb').style.left=p;
   const mxf=document.getElementById('mxf');
   if(mxf&&+mxf.value!==v) mxf.value=v;
-  flashMidi();
+  if(!fromMod) flashMidi();
 }
 
 (function(){
@@ -4014,24 +4020,25 @@ function processGeomModule(mod, srcCanvas){
     }
     case 'perspective': {
       ctx.restore();
-      if(!mod.geomOffscreen2){
-        mod.geomOffscreen2=document.createElement('canvas');
+      // scratch canvas follows the resolution (it was never resized: black band after a governor step)
+      if(!mod.geomOffscreen2||mod.geomOffscreen2.width!==W||mod.geomOffscreen2.height!==H){
+        if(!mod.geomOffscreen2) mod.geomOffscreen2=document.createElement('canvas');
         mod.geomOffscreen2.width=W; mod.geomOffscreen2.height=H;
         mod.geomCtx2=mod.geomOffscreen2.getContext('2d',{willReadFrequently:true});
       }
+      mod.geomCtx2.clearRect(0,0,W,H);
       mod.geomCtx2.drawImage(srcCanvas,0,0,W,H);
-      const src=mod.geomCtx2.getImageData(0,0,W,H);
-      const dst=ctx.createImageData(W,H);
+      const img=mod.geomCtx2.getImageData(0,0,W,H);
+      // shift each row in place (copyWithin + edge fill) instead of a per-pixel copy into a fresh ImageData
+      const p32=new Uint32Array(img.data.buffer);
       const skew=(p-0.5)*1.2*t;
       for(let y=0;y<H;y++){
-        const offset=Math.round((y/H-0.5)*skew*W);
-        for(let x=0;x<W;x++){
-          const sx=Math.max(0,Math.min(W-1,x+offset));
-          const si=(y*W+sx)*4, di=(y*W+x)*4;
-          dst.data[di]=src.data[si];dst.data[di+1]=src.data[si+1];dst.data[di+2]=src.data[si+2];dst.data[di+3]=255;
-        }
+        const o=y*W,off=Math.max(-W,Math.min(W,Math.round((y/H-0.5)*skew*W)));
+        if(off>0){const e=p32[o+W-1];p32.copyWithin(o,o+off,o+W);p32.fill(e,o+W-off,o+W);}
+        else if(off<0){const e=p32[o];p32.copyWithin(o-off,o,o+W+off);p32.fill(e,o,o-off);}
+        for(let i=o,e2=o+W;i<e2;i++) p32[i]|=0xff000000;
       }
-      ctx.putImageData(dst,0,0);
+      ctx.putImageData(img,0,0);
       return mod.offscreen;
     }
     default:
@@ -4057,12 +4064,20 @@ function initDmosh(mod){
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   if(!mod.dmosh)mod.dmosh={iFrame:null,iFrameCounter:0,dispBuf:null,flowBuf:null,flowRef:null,moshBuf:null};
 }
+let _dmTrigT=null;
+function _dmTrig(){if(!_dmTrigT){const c=new Float32Array(1025),s=new Float32Array(1025);for(let i=0;i<=1024;i++){const a=i/1024*Math.PI*2;c[i]=Math.cos(a);s[i]=Math.sin(a);}_dmTrigT=[c,s];}return _dmTrigT;}
+// per-module scratch frame for the remap effects (was a fresh W×H×4 array per frame); re-sized on resolution change
+function _dmScratch(dm,len){if(!dm.scratch||dm.scratch.length!==len)dm.scratch=new Uint8ClampedArray(len);return dm.scratch;}
 function copyGray(pixels,buf){for(let i=0,j=0;i<pixels.length;i+=4,j++)buf[j]=(pixels[i]*0.299+pixels[i+1]*0.587+pixels[i+2]*0.114)/255;}
 function primeFx(mod,fxId,d){
   const dm=mod.dmosh,len=d.length;
-  if(fxId==='flow'&&!dm.flowRef){dm.flowRef=new Float32Array(len/4);dm.flowBuf=new Float32Array(len/4*2);dm.moshBuf=new Uint8ClampedArray(len);dm.moshBuf.set(d);copyGray(d,dm.flowRef);}
-  if(fxId==='iframe'&&!dm.iFrame){dm.iFrame=new Uint8ClampedArray(len);dm.iFrame.set(d);}
-  if(fxId==='disp'&&!dm.dispBuf){dm.dispBuf=new Uint8ClampedArray(len);dm.dispBuf.set(d);}
+  // accumulators are Float32: rounded 8-bit lerps with small t never converged (permanent burn-in)
+  if(fxId==='flow'&&(!dm.flowRef||!dm.moshBuf||dm.moshBuf.length!==len)){dm.flowRef=new Float32Array(len/4);dm.flowBuf=new Float32Array(len/4*2);dm.moshBuf=new Uint8ClampedArray(len);dm.moshBuf.set(d);copyGray(d,dm.flowRef);}
+  if(fxId==='iframe'&&(!dm.iFrame||dm.iFrame.length!==len)){dm.iFrame=new Uint8ClampedArray(len);dm.iFrame.set(d);}
+  if(fxId==='disp'&&(!dm.dispBuf||dm.dispBuf.length!==len)){dm.dispBuf=new Float32Array(d);}
+  if(fxId==='aval'&&(!dm.avalBuf||dm.avalBuf.length!==len)){dm.avalBuf=new Float32Array(d);}
+  if(fxId==='pframe'&&(!dm.pframeBuf||dm.pframeBuf.length!==len)){dm.pframeBuf=new Float32Array(d);}
+  if(fxId==='delta'&&(!dm.deltaBuf||dm.deltaBuf.length!==len)){dm.deltaBuf=new Uint8ClampedArray(d);}
 }
 function runFx(fxId,d,intensity,param,dm){
   const len=d.length;
@@ -4077,7 +4092,7 @@ function runFx(fxId,d,intensity,param,dm){
       dm.flowBuf[i*2]=dm.flowBuf[i*2]*decay+gx*strength;
       dm.flowBuf[i*2+1]=dm.flowBuf[i*2+1]*decay+gy*strength;
     }
-    const out=new Uint8ClampedArray(len);
+    const out=_dmScratch(dm,len);
     for(let y=0;y<H;y++)for(let x=0;x<W;x++){
       const i=y*W+x;
       const sx=Math.max(0,Math.min(W-1,Math.round(x+dm.flowBuf[i*2])));
@@ -4095,44 +4110,30 @@ function runFx(fxId,d,intensity,param,dm){
     for(let i=0;i<len;i+=4){const dr=d[i]-dm.iFrame[i],dg=d[i+1]-dm.iFrame[i+1],db=d[i+2]-dm.iFrame[i+2];if(Math.abs(dr)+Math.abs(dg)+Math.abs(db)>20){d[i]=lerp(d[i],dm.iFrame[i]+dr*2,intensity);d[i+1]=lerp(d[i+1],dm.iFrame[i+1]+dg*2,intensity);d[i+2]=lerp(d[i+2],dm.iFrame[i+2]+db*2,intensity);}}
   } else if(fxId==='aval'){
     // Avalanche: pixels fall toward bottom, dragging color down like melting/dripping
-    if(!dm.avalBuf){dm.avalBuf=new Uint8ClampedArray(d);}
+    const A=dm.avalBuf; if(!A)return;
     // blend current frame into buffer slowly
-    const hold=0.85+param*0.13;
-    for(let i=0;i<len;i+=4){
-      dm.avalBuf[i]=lerp(dm.avalBuf[i],d[i],1-hold)|0;
-      dm.avalBuf[i+1]=lerp(dm.avalBuf[i+1],d[i+1],1-hold)|0;
-      dm.avalBuf[i+2]=lerp(dm.avalBuf[i+2],d[i+2],1-hold)|0;
-    }
-    // avalanche: for each pixel, pull color from above row — creates downward drip/smear
+    const k=1-(0.85+param*0.13);
+    for(let i=0;i<len;i+=4){A[i]+=(d[i]-A[i])*k;A[i+1]+=(d[i+1]-A[i+1])*k;A[i+2]+=(d[i+2]-A[i+2])*k;}
+    // one top-down pass with an exponential-decay carry: each row pulls from the (already smeared) row
+    // above. replaces up to 20 two-tap passes; a/(1-a)=steps*strength keeps the same mean drag per frame
     const strength=intensity*param;
-    const steps=Math.max(1,Math.ceil(strength*20));
-    for(let step=0;step<steps;step++){
-      for(let y=H-1;y>0;y--){
-        for(let x=0;x<W;x++){
-          const di=(y*W+x)*4;
-          const si=((y-1)*W+x)*4;
-          // drag pixel from above downward
-          dm.avalBuf[di]=lerp(dm.avalBuf[di],dm.avalBuf[si],strength)|0;
-          dm.avalBuf[di+1]=lerp(dm.avalBuf[di+1],dm.avalBuf[si+1],strength)|0;
-          dm.avalBuf[di+2]=lerp(dm.avalBuf[di+2],dm.avalBuf[si+2],strength)|0;
-        }
-      }
-    }
+    const ns=Math.max(1,Math.ceil(strength*20))*strength,a=ns/(1+ns),b=1-a,rw=W*4;
+    for(let i=rw;i<len;i+=4){A[i]=A[i]*b+A[i-rw]*a;A[i+1]=A[i+1]*b+A[i+1-rw]*a;A[i+2]=A[i+2]*b+A[i+2-rw]*a;}
     // blend avalanche buffer into output
     for(let i=0;i<len;i+=4){
-      d[i]=lerp(d[i],dm.avalBuf[i],intensity)|0;
-      d[i+1]=lerp(d[i+1],dm.avalBuf[i+1],intensity)|0;
-      d[i+2]=lerp(d[i+2],dm.avalBuf[i+2],intensity)|0;
+      d[i]=d[i]+(A[i]-d[i])*intensity;
+      d[i+1]=d[i+1]+(A[i+1]-d[i+1])*intensity;
+      d[i+2]=d[i+2]+(A[i+2]-d[i+2])*intensity;
     }
   } else if(fxId==='warp'){
-    const freq=1+param*8,amp=intensity*20,out=new Uint8ClampedArray(len);
-    for(let y=0;y<H;y++)for(let x=0;x<W;x++){const off=Math.round(Math.sin(y/H*Math.PI*2*freq+performance.now()*0.002)*amp);const sx=Math.max(0,Math.min(W-1,x+off));const si=(y*W+sx)*4,di=(y*W+x)*4;out[di]=d[si];out[di+1]=d[si+1];out[di+2]=d[si+2];out[di+3]=255;}
+    const freq=1+param*8,amp=intensity*20,out=_dmScratch(dm,len),ph=performance.now()*0.002;
+    for(let y=0;y<H;y++){const off=Math.round(Math.sin(y/H*Math.PI*2*freq+ph)*amp);for(let x=0;x<W;x++){const sx=Math.max(0,Math.min(W-1,x+off));const si=(y*W+sx)*4,di=(y*W+x)*4;out[di]=d[si];out[di+1]=d[si+1];out[di+2]=d[si+2];out[di+3]=255;}}
     d.set(out);
   } else if(fxId==='pframe'){
     // P-frame corrupt: divide into blocks, copy each block from a WRONG location in the prev frame
-    if(!dm.pframeBuf){dm.pframeBuf=new Uint8ClampedArray(d);}
+    const P=dm.pframeBuf; if(!P)return;
     const bs=16; // block size
-    const out=new Uint8ClampedArray(d);
+    const out=_dmScratch(dm,len); out.set(d);
     const corruptRate=intensity*0.6;
     for(let by=0;by<H;by+=bs){
       for(let bx=0;bx<W;bx+=bs){
@@ -4146,45 +4147,42 @@ function runFx(fxId,d,intensity,param,dm){
               const sy=Math.max(0,Math.min(H-1,by+y+mvy));
               const di=((by+y)*W+(bx+x))*4;
               const si=(sy*W+sx)*4;
-              out[di]=dm.pframeBuf[si];
-              out[di+1]=dm.pframeBuf[si+1];
-              out[di+2]=dm.pframeBuf[si+2];
+              out[di]=P[si];
+              out[di+1]=P[si+1];
+              out[di+2]=P[si+2];
             }
           }
         }
       }
     }
     // slowly update prev frame buffer
-    const decay=1-param*0.3;
-    for(let i=0;i<len;i+=4){
-      dm.pframeBuf[i]=lerp(dm.pframeBuf[i],d[i],1-decay)|0;
-      dm.pframeBuf[i+1]=lerp(dm.pframeBuf[i+1],d[i+1],1-decay)|0;
-      dm.pframeBuf[i+2]=lerp(dm.pframeBuf[i+2],d[i+2],1-decay)|0;
-    }
+    const k=param*0.3;
+    for(let i=0;i<len;i+=4){P[i]+=(d[i]-P[i])*k;P[i+1]+=(d[i+1]-P[i+1])*k;P[i+2]+=(d[i+2]-P[i+2])*k;}
     d.set(out);
   } else if(fxId==='delta'){
     // Delta frame: show only what CHANGED between frames, amplified — pure inter-frame diff
-    if(!dm.deltaBuf){dm.deltaBuf=new Uint8ClampedArray(d);}
+    const D=dm.deltaBuf; if(!D)return;
     const amp=1+param*8;
     for(let i=0;i<len;i+=4){
-      const dr=(d[i]-dm.deltaBuf[i])*amp;
-      const dg=(d[i+1]-dm.deltaBuf[i+1])*amp;
-      const db=(d[i+2]-dm.deltaBuf[i+2])*amp;
+      const r=d[i],g=d[i+1],b=d[i+2];
+      const dr=(r-D[i])*amp,dg=(g-D[i+1])*amp,db=(b-D[i+2])*amp;
+      // keep the unmodified input as the reference (it used to store its own output, diffing against itself)
+      D[i]=r;D[i+1]=g;D[i+2]=b;
       // blend amplified delta with original
-      d[i]=Math.min(255,Math.max(0,lerp(d[i],128+dr,intensity)))|0;
-      d[i+1]=Math.min(255,Math.max(0,lerp(d[i+1],128+dg,intensity)))|0;
-      d[i+2]=Math.min(255,Math.max(0,lerp(d[i+2],128+db,intensity)))|0;
+      d[i]=Math.min(255,Math.max(0,lerp(r,128+dr,intensity)))|0;
+      d[i+1]=Math.min(255,Math.max(0,lerp(g,128+dg,intensity)))|0;
+      d[i+2]=Math.min(255,Math.max(0,lerp(b,128+db,intensity)))|0;
     }
-    // update buffer BEFORE modification so next frame gets clean diff
-    dm.deltaBuf.set(new Uint8ClampedArray(d.buffer.slice ? d.buffer.slice(0,len) : Array.from(d)));
   } else if(fxId==='bit'){
     const levels=Math.max(2,Math.round(2+(1-param)*62)),q=255/(levels-1);
     for(let i=0;i<len;i+=4){d[i]=lerp(d[i],Math.round(d[i]/q)*q,intensity);d[i+1]=lerp(d[i+1],Math.round(d[i+1]/q)*q,intensity);d[i+2]=lerp(d[i+2],Math.round(d[i+2]/q)*q,intensity);}
   } else if(fxId==='disp'){
-    if(!dm.dispBuf)return;
-    const scale=param*30*intensity,out=new Uint8ClampedArray(len);
-    for(let i=0;i<dm.dispBuf.length;i+=4){dm.dispBuf[i]=Math.round(dm.dispBuf[i]*0.95+d[i]*0.05);dm.dispBuf[i+1]=Math.round(dm.dispBuf[i+1]*0.95+d[i+1]*0.05);dm.dispBuf[i+2]=Math.round(dm.dispBuf[i+2]*0.95+d[i+2]*0.05);}
-    for(let y=0;y<H;y++)for(let x=0;x<W;x++){const di=(y*W+x)*4;const lum=(dm.dispBuf[di]*0.299+dm.dispBuf[di+1]*0.587+dm.dispBuf[di+2]*0.114)/255;const angle=lum*Math.PI*2;const sx=Math.max(0,Math.min(W-1,Math.round(x+Math.cos(angle)*scale)));const sy=Math.max(0,Math.min(H-1,Math.round(y+Math.sin(angle)*scale)));const si=(sy*W+sx)*4;out[di]=d[si];out[di+1]=d[si+1];out[di+2]=d[si+2];out[di+3]=255;}
+    const B=dm.dispBuf; if(!B)return;
+    const scale=param*30*intensity,out=_dmScratch(dm,len);
+    for(let i=0;i<len;i+=4){B[i]=B[i]*0.95+d[i]*0.05;B[i+1]=B[i+1]*0.95+d[i+1]*0.05;B[i+2]=B[i+2]*0.95+d[i+2]*0.05;}
+    // angle = lum*2π: cos/sin from a 1024-step table instead of two trig calls per pixel
+    const CS=_dmTrig(),dx=CS[0],dy=CS[1];
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){const di=(y*W+x)*4;const li=((B[di]*0.299+B[di+1]*0.587+B[di+2]*0.114)*4.0157)|0;const sx=Math.max(0,Math.min(W-1,Math.round(x+dx[li]*scale)));const sy=Math.max(0,Math.min(H-1,Math.round(y+dy[li]*scale)));const si=(sy*W+sx)*4;out[di]=d[si];out[di+1]=d[si+1];out[di+2]=d[si+2];out[di+3]=255;}
     d.set(out);
   }
 }
@@ -4224,21 +4222,29 @@ function processDatmoshModule(mod,srcCanvas){
   mod._lastResult=mod.offscreen;
   return mod.offscreen;
 }
+// drop an effect's accumulation state so it starts fresh next time it's enabled
+function _dmoshResetFx(mod,fxId){
+  const dm=mod.dmosh; if(!dm) return;
+  if(fxId==='flow'){dm.moshBuf=null;dm.flowRef=null;dm.flowBuf=null;}
+  else if(fxId==='iframe'){dm.iFrame=null;dm.iFrameCounter=0;}
+  else if(fxId==='disp') dm.dispBuf=null;
+  else if(fxId==='pframe') dm.pframeBuf=null;
+  else if(fxId==='delta') dm.deltaBuf=null;
+  else if(fxId==='aval') dm.avalBuf=null;
+}
 function toggleDmoshFx(modId,fxId){
   const mod=state.modules.find(m=>m.id===modId);if(!mod)return;
   if(!mod.activeFxQueue)mod.activeFxQueue=[];
   const idx=mod.activeFxQueue.indexOf(fxId);
   if(idx>=0){
     mod.activeFxQueue.splice(idx,1);
-    // reset buffers for this effect so it starts fresh next time
-    if(fxId==='flow'&&mod.dmosh){mod.dmosh.moshBuf=null;mod.dmosh.flowRef=null;mod.dmosh.flowBuf=null;}
-    if(fxId==='iframe'&&mod.dmosh){mod.dmosh.iFrame=null;mod.dmosh.iFrameCounter=0;}
-    if(fxId==='disp'&&mod.dmosh){mod.dmosh.dispBuf=null;}
-    if(fxId==='pframe'&&mod.dmosh){mod.dmosh.pframeBuf=null;mod.dmosh.pframeRef=null;}
-    if(fxId==='delta'&&mod.dmosh){mod.dmosh.deltaBuf=null;}
-    if(fxId==='aval'&&mod.dmosh){mod.dmosh.avalBuf=null;}
-  } else{if(mod.activeFxQueue.length>=1)mod.activeFxQueue.shift();mod.activeFxQueue.push(fxId);}
-  document.querySelectorAll('#fxkeys-'+modId+' .fx-key').forEach(k=>k.classList.toggle('active',mod.activeFxQueue.includes(k.dataset.fxid)));
+    _dmoshResetFx(mod,fxId);
+  } else{
+    // the evicted effect is reset like an explicit toggle-off (it used to keep stale buffers)
+    if(mod.activeFxQueue.length>=1)_dmoshResetFx(mod,mod.activeFxQueue.shift());
+    mod.activeFxQueue.push(fxId);
+  }
+  _fxKeysOf('fxkeys-'+modId).forEach(k=>k.classList.toggle('active',mod.activeFxQueue.includes(k.dataset.fxid)));
   const active=mod.activeFxQueue[mod.activeFxQueue.length-1];
   const lbl=document.getElementById('param-lbl-'+modId);
   if(lbl&&active)lbl.textContent=DMOSH_FX.find(f=>f.id===active)?.param||'parameters';
@@ -4460,16 +4466,53 @@ const ENV_SHAPES=[
   {id:'rev',   label:['reverse','']},
   {id:'ramp',  label:['ramp','up']}
 ];
+// ── modulator timing + viz helpers ──
+// modulators advance by elapsed time, scaled so one 60fps frame = 1 (they stepped a fixed amount per
+// rAF tick: 2× speed on 120Hz displays, slow under load). measured once per rendered frame, clamped to 100ms.
+let _modF=-1,_modL=-1,_modLast=0,_modK=1;
+function _modStep(){
+  if(state.frames!==_modF||state.lastFps!==_modL){
+    _modF=state.frames;_modL=state.lastFps;
+    const now=performance.now();
+    _modK=_modLast?Math.min(100,Math.max(0,now-_modLast))*0.06:1;
+    _modLast=now;
+  }
+  return _modK;
+}
+// viz canvas widths come from a ResizeObserver (reading offsetWidth right after applyLfoTarget's style
+// writes forced a layout per modulator per frame). viz draws only on ui ticks while the module is open.
+const _vizW=new WeakMap();
+const _vizRO=typeof ResizeObserver==='function'?new ResizeObserver(es=>{for(const e of es)_vizW.set(e.target,e.target.offsetWidth);}):null;
+function _vizCtx(mod,square,force){
+  if(!force&&(state.drawUi===false||!mod.open)) return null;
+  const cv=mod.cv; if(!cv) return null;
+  const w=_vizRO?(_vizW.get(cv)||0):cv.offsetWidth; if(!w) return null;
+  const h=square?w:Math.round(w*9/16);
+  if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}
+  return cv.getContext('2d');
+}
+// fixed ring buffer for scrolling viz history (was push/shift on an array, only while visible)
+const _HIST_N=1024;
+function _histPush(mod,v){const hs=mod._hist||(mod._hist={b:new Float32Array(_HIST_N),i:0,n:0});hs.b[hs.i]=v;hs.i=(hs.i+1)%_HIST_N;if(hs.n<_HIST_N)hs.n++;}
+function _histPath(ctx,mod,w,h){
+  const hs=mod._hist; if(!hs||!hs.n) return 0;
+  const n=Math.min(hs.n,w),step=w/n;
+  for(let k=0;k<n;k++){const v=hs.b[(hs.i-n+k+_HIST_N)%_HIST_N],x=k*step,y=h-(v*(h-4)+2);k===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}
+  return n;
+}
 function tickEnvelopes(){
+  const k=_modStep();
   state.modules.forEach(mod=>{
     if(mod.name!=='envelope'||mod.enabled===false) return;
     if(!mod.envPhase) mod.envPhase=0;
-    if(!mod.envTriggered) return;
-    const rate=0.01+mod.intensity*0.05;
-    mod.envPhase=Math.min(1,mod.envPhase+rate);
-    if(mod.envPhase>=1){mod.envPhase=0;mod.envTriggered=false;}
-    const val=envShape(ENV_SHAPES[mod.activeFx]?.id||'ad',mod.envPhase)*mod.param;
-    applyLfoTarget(mod,val);
+    if(mod.envTriggered){
+      const rate=0.01+mod.intensity*0.05;
+      mod.envPhase=Math.min(1,mod.envPhase+rate*k);
+      // apply the shape's end value on completion (phase 0 left perc/exp/rev at full)
+      const val=envShape(ENV_SHAPES[mod.activeFx]?.id||'ad',mod.envPhase)*mod.param;
+      if(mod.envPhase>=1){mod.envPhase=0;mod.envTriggered=false;}
+      applyLfoTarget(mod,val);
+    }
     drawEnvWaveform(mod);
   });
 }
@@ -4487,14 +4530,11 @@ function envShape(id,t){
   }
 }
 function drawEnvWaveform(mod){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const w=ctx.canvas.width,h=ctx.canvas.height,id=ENV_SHAPES[mod.activeFx]?.id||'ad';
   ctx.clearRect(0,0,w,h);
   ctx.strokeStyle='rgba(255,255,255,0.6)';ctx.lineWidth=1.5;ctx.beginPath();
-  for(let i=0;i<=w;i++){const v=envShape(ENV_SHAPES[mod.activeFx]?.id||'ad',i/w);ctx.lineTo(i,h-(v*mod.param*(h-6)+3));}
+  for(let i=0;i<=w;i++){const v=envShape(id,i/w);ctx.lineTo(i,h-(v*mod.param*(h-6)+3));}
   ctx.stroke();
   // playhead
   const px=Math.round(mod.envPhase*w);
@@ -4513,36 +4553,58 @@ const AUDIO_FX=[
   {id:'bass_inv',label:['bass','inverted']},
   {id:'mid_inv', label:['middle','inverted']}
 ];
+let _audioStream=null,_audioDenied=false,_audioPending=false;
+function _audioRetryBtns(show){state.modules.forEach(m=>{if(m.name!=='audio')return;const b=document.getElementById('audio-retry-'+m.id);if(b)b.style.display=show?'block':'none';});}
+// one attempt at a time; a denial sets _audioDenied and only the retry button asks again
+// (a failed attempt used to null audioCtx, so tickAudio re-prompted with a new AudioContext every frame)
 function initAudio(modId){
-  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-  analyser=audioCtx.createAnalyser();
-  analyser.fftSize=2048;
-  audioData=new Uint8Array(analyser.frequencyBinCount);
+  if(audioCtx||_audioPending) return;
+  _audioDenied=false;
+  const AC=window.AudioContext||window.webkitAudioContext;
+  if(!AC||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){_audioDenied=true;setStatus('audio input unavailable');_audioRetryBtns(true);return;}
+  _audioPending=true;
+  const ctx=new AC();
   navigator.mediaDevices.getUserMedia({audio:true,video:false}).then(stream=>{
-    audioCtx.createMediaStreamSource(stream).connect(analyser);
+    _audioPending=false;
+    // module removed while the prompt was open: don't keep the mic
+    if(!state.modules.some(m=>m.name==='audio')){stream.getTracks().forEach(t=>t.stop());ctx.close().catch(()=>{});return;}
+    audioCtx=ctx;_audioStream=stream;
+    analyser=ctx.createAnalyser();
+    analyser.fftSize=2048;
+    audioData=new Uint8Array(analyser.frequencyBinCount);
+    ctx.createMediaStreamSource(stream).connect(analyser);
     setStatus('audio input active');
-    // hide retry button if visible
-    const btn=document.getElementById('audio-retry-'+modId);
-    if(btn) btn.style.display='none';
+    _audioRetryBtns(false);
   }).catch(()=>{
+    _audioPending=false;_audioDenied=true;
+    ctx.close().catch(()=>{});
     setStatus('audio input denied — click retry to try again');
-    audioCtx=null; analyser=null; audioData=null;
-    // show retry button
-    const btn=document.getElementById('audio-retry-'+modId);
-    if(btn) btn.style.display='block';
+    _audioRetryBtns(true);
   });
 }
+function retryAudio(){if(!_audioPending){_audioDenied=false;initAudio();}}
+// stop the mic tracks and close the context once no audio module is left (the mic used to stay live)
+function releaseAudio(){
+  if(_audioStream) _audioStream.getTracks().forEach(t=>t.stop());
+  if(audioCtx) audioCtx.close().catch(()=>{});
+  audioCtx=null;analyser=null;audioData=null;_audioStream=null;_audioDenied=false;
+}
 function getAudioBand(start,end){
-  if(!analyser||!audioData) return 0;
-  analyser.getByteFrequencyData(audioData);
-  let sum=0;const len=end-start;
+  if(!audioData||end<=start) return 0;
+  let sum=0;
   for(let i=start;i<end;i++) sum+=audioData[i];
-  return sum/(len*255);
+  return sum/((end-start)*255);
 }
 function tickAudio(){
+  _modStep();
+  let any=false,fresh=false;
   state.modules.forEach(mod=>{
-    if(mod.name!=='audio'||mod.enabled===false) return;
-    if(!audioCtx) initAudio(mod.id);
+    if(mod.name!=='audio') return;
+    any=true;
+    if(mod.enabled===false) return;
+    if(!audioCtx&&!_audioDenied) initAudio(mod.id);
+    // refresh the spectrum once per frame here (rms/peak relied on the viz having fetched it)
+    if(analyser&&!fresh){analyser.getByteFrequencyData(audioData);fresh=true;}
     const bins=analyser?analyser.frequencyBinCount:0;
     let val=0;
     const fx=AUDIO_FX[mod.activeFx]?.id||'bass';
@@ -4550,7 +4612,7 @@ function tickAudio(){
     else if(fx==='mid')   val=getAudioBand(Math.floor(bins*0.05),Math.floor(bins*0.3));
     else if(fx==='treble')val=getAudioBand(Math.floor(bins*0.3),Math.floor(bins*0.8));
     else if(fx==='rms'){  if(audioData){let s=0;for(let i=0;i<audioData.length;i++)s+=audioData[i]*audioData[i];val=Math.sqrt(s/audioData.length)/255;}}
-    else if(fx==='peak'){ if(audioData)val=Math.max(...audioData)/255;}
+    else if(fx==='peak'){ if(audioData){let m=0;for(let i=0;i<audioData.length;i++)if(audioData[i]>m)m=audioData[i];val=m/255;}}
     else if(fx==='transient'){
       if(!mod._prevRms) mod._prevRms=0;
       const cur=getAudioBand(0,Math.floor(bins*0.3));
@@ -4563,16 +4625,13 @@ function tickAudio(){
     applyLfoTarget(mod,val);
     drawAudioViz(mod,val);
   });
+  if(!any&&(audioCtx||_audioStream||_audioDenied)) releaseAudio();
 }
 function drawAudioViz(mod,val){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const w=ctx.canvas.width,h=ctx.canvas.height;
   ctx.clearRect(0,0,w,h);
   if(!analyser||!audioData) return;
-  analyser.getByteFrequencyData(audioData);
   ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=1;ctx.beginPath();
   const step=Math.floor(audioData.length/w);
   for(let i=0;i<w;i++){const v=audioData[i*step]||0;const y=h-(v/255)*(h-4);i===0?ctx.moveTo(i,y):ctx.lineTo(i,y);}
@@ -4595,6 +4654,7 @@ const SEQ_PRESETS=[
 ];
 
 function tickSequencers(){
+  const k=_modStep();
   state.modules.forEach(mod=>{
     if(mod.name!=='sequencer'||mod.enabled===false) return;
     if(!mod.seqPhase) mod.seqPhase=0;
@@ -4603,7 +4663,7 @@ function tickSequencers(){
     if(!mod.seqPreset) mod.seqPreset=0;
     if(mod.seqStep===undefined) mod.seqStep=0;
     const rate=0.005+mod.intensity*0.1;
-    mod.seqPhase+=rate;
+    mod.seqPhase+=rate*k;
     if(mod.seqPhase>=1){
       mod.seqPhase=0;
       mod.seqStep=(mod.seqStep+1)%SEQ_STEPS;
@@ -4620,7 +4680,7 @@ function seqLoadPreset(modId,idx){
   mod.seqPreset=idx;
   mod.seqSteps=[...mod.seqPresets[idx]];
   // update preset buttons
-  document.querySelectorAll(`#seq-presets-${modId} .fx-key`).forEach((k,i)=>{
+  _fxKeysOf('seq-presets-'+modId).forEach((k,i)=>{
     k.classList.toggle('active',i===idx);
   });
 }
@@ -4630,18 +4690,15 @@ function seqSavePreset(modId,idx){
   if(!mod.seqPresets) mod.seqPresets=SEQ_PRESETS.map(p=>[...p]);
   mod.seqPresets[idx]=[...mod.seqSteps];
   mod.seqPreset=idx;
-  document.querySelectorAll(`#seq-presets-${modId} .fx-key`).forEach((k,i)=>{
+  _fxKeysOf('seq-presets-'+modId).forEach((k,i)=>{
     k.classList.toggle('active',i===idx);
   });
   autoSave();
 }
 
 function drawSeqViz(mod){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const cv=ctx.canvas,w=cv.width,h=cv.height;
   // black background
   ctx.fillStyle='#000';
   ctx.fillRect(0,0,w,h);
@@ -4669,17 +4726,17 @@ function drawSeqViz(mod){
     const active=i===mod.seqStep;
     ctx.fillStyle=active?cv._ditherActive:cv._ditherInactive;
     ctx.fillRect(x+gap,h-bh,sw-gap*2,bh);
-    if(!cv._seqBound){
-      cv.addEventListener('mousedown',e=>{
-        const rect=cv.getBoundingClientRect();
-        const cx=e.clientX-rect.left,cy=e.clientY-rect.top;
-        const si=Math.floor(cx/(rect.width/SEQ_STEPS));
-        const val=1-(cy/rect.height);
-        if(mod.seqSteps&&si>=0&&si<SEQ_STEPS) mod.seqSteps[si]=Math.max(0,Math.min(1,val));
-      });
-      cv._seqBound=true;
-    }
   });
+  if(!cv._seqBound){
+    cv.addEventListener('mousedown',e=>{
+      const rect=cv.getBoundingClientRect();
+      const cx=e.clientX-rect.left,cy=e.clientY-rect.top;
+      const si=Math.floor(cx/(rect.width/SEQ_STEPS));
+      const val=1-(cy/rect.height);
+      if(mod.seqSteps&&si>=0&&si<SEQ_STEPS) mod.seqSteps[si]=Math.max(0,Math.min(1,val));
+    });
+    cv._seqBound=true;
+  }
 }
 
 /* ── ASCII / HALFTONE ENGINE ── */
@@ -4698,111 +4755,99 @@ const BRAILLE='⣿⣷⣦⣄⡀ ';
 const BLOCK_CHARS='█▓▒░ ';
 const MATRIX_CHARS='アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEF';
 
+// ascii renders without per-cell canvas calls: every shape (glyph, disc, cross, bar) is rasterised once by
+// the canvas in white into a cached alpha mask, then composited per cell in colour into an ImageData.
+// cells are sampled from a nearest-neighbour downscale of the frame (one pixel per cell, at its centre).
+// was up to ~25k fillText/arc/fillRect calls with a fresh fillStyle string each (17ms in mode 'lines').
+const _asciiTileCv=document.createElement('canvas');_asciiTileCv.width=_asciiTileCv.height=128;
+const _asciiTileCtx=_asciiTileCv.getContext('2d',{willReadFrequently:true});
+// draw(ctx,pad) paints a white shape anchored at (pad,pad); returns its alpha mask + bbox relative to the anchor
+function _asciiMask(draw,pad){
+  const c=_asciiTileCtx;
+  c.setTransform(1,0,0,1,0,0);c.globalAlpha=1;c.clearRect(0,0,128,128);c.fillStyle='#fff';c.textBaseline='top';
+  draw(c,pad);
+  const d=c.getImageData(0,0,128,128).data;
+  let x0=128,y0=128,x1=-1,y1=-1;
+  for(let y=0;y<128;y++)for(let x=0;x<128;x++)if(d[(y*128+x)*4+3]){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;}
+  if(x1<0) return null;
+  const w=x1-x0+1,h=y1-y0+1,a=new Uint8Array(w*h);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++)a[y*w+x]=d[((y0+y)*128+x0+x)*4+3];
+  return {ox:x0-pad,oy:y0-pad,w,h,a};
+}
+// source-over a white mask tinted (r,g,b) onto opaque rgba buf at anchor (ax,ay)
+function _asciiBlend(o,e,ax,ay,r,g,b){
+  const a=e.a,ew=e.w,bx=ax+e.ox,by=ay+e.oy;
+  for(let yy=0,k=0;yy<e.h;yy++){
+    const y=by+yy; if(y<0||y>=H){k+=ew;continue;}
+    for(let xx=0,i=(y*W+bx)*4;xx<ew;xx++,k++,i+=4){
+      const al=a[k]; if(!al) continue;
+      const x=bx+xx; if(x<0||x>=W) continue;
+      if(al===255){o[i]=r;o[i+1]=g;o[i+2]=b;}
+      else{const f=al/255;o[i]=o[i]+(r-o[i])*f;o[i+1]=o[i+1]+(g-o[i+1])*f;o[i+2]=o[i+2]+(b-o[i+2])*f;}
+    }
+  }
+}
+const _ASCII_SETS={ascii:[...ASCII_CHARS],braille:[...BRAILLE],matrix:[...MATRIX_CHARS],symbols:[...BLOCK_CHARS],binary:['0','1']};
 function processAsciiModule(mod,srcCanvas){
-  if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
-  mod.offCtx.drawImage(srcCanvas,0,0,W,H);
+  if(_shouldSkipHeavy(mod)) return mod._lastResult;
+  if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d');}
   const fx=ASCII_FX[mod.activeFx];
-  if(!fx) return mod.offscreen||srcCanvas;
-  const cellSize=Math.max(4,Math.round(4+mod.param*28));
-  const cols=Math.floor(W/cellSize),rows=Math.floor(H/cellSize);
-  const src=mod.offCtx.getImageData(0,0,W,H);
-  const d=src.data;
-  const ctx=mod.offCtx;
-
-  switch(fx.id){
-    case 'ascii':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`bold ${cellSize}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const ci=Math.floor((1-lum)*(ASCII_CHARS.length-1));
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(ASCII_CHARS[ci],col*cellSize,row*cellSize);
-      } break;}
-
-    case 'braille':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`${cellSize}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const ci=Math.floor((1-lum)*(BRAILLE.length-1));
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(BRAILLE[ci],col*cellSize,row*cellSize);
-      } break;}
-
-    case 'binary':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`bold ${Math.max(6,cellSize-2)}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(lum>0.5?'1':'0',col*cellSize,row*cellSize);
-      } break;}
-
-    case 'matrix':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`${cellSize}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const ci=Math.floor((1-lum)*(MATRIX_CHARS.length-1));
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(MATRIX_CHARS[ci],col*cellSize,row*cellSize);
-      } break;}
-
-    case 'symbols':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`${cellSize}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const ci=Math.floor((1-lum)*(BLOCK_CHARS.length-1));
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(BLOCK_CHARS[ci],col*cellSize,row*cellSize);
-      } break;}
-
-    case 'halftone':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const r=lum*cellSize*0.52;
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.beginPath();ctx.arc(col*cellSize+cellSize/2,row*cellSize+cellSize/2,r,0,Math.PI*2);ctx.fill();
-      } break;}
-
-    case 'lines':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      const gap=Math.max(2,cellSize);
-      for(let y=0;y<H;y+=gap)for(let x=0;x<W;x++){
-        const px=(y*W+x)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const lh=Math.round(lum*gap*0.9)+1;
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillRect(x,y+(gap-lh)/2,1,lh);
-      } break;}
-
-    case 'crosses':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const s=Math.round(lum*cellSize*0.9)+1;
-        const cx2=col*cellSize+cellSize/2,cy2=row*cellSize+cellSize/2;
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillRect(cx2-s/2,cy2-1,s,2);
-        ctx.fillRect(cx2-1,cy2-s/2,2,s);
-      } break;}
+  if(!fx){mod.offCtx.drawImage(srcCanvas,0,0,W,H);return mod.offscreen;}
+  const id=fx.id,cs=Math.max(4,Math.round(4+mod.param*28));
+  const lines=id==='lines',gap=Math.max(2,cs);
+  const cols=lines?W:Math.floor(W/cs),rows=lines?Math.ceil(H/gap):Math.floor(H/cs);
+  // one sample per cell (lines: per pixel of every gap-th row)
+  let sc=mod._asciiSmp;
+  if(!sc){sc=mod._asciiSmp=document.createElement('canvas');mod._asciiSmpCtx=sc.getContext('2d',{willReadFrequently:true});}
+  if(sc.width!==cols||sc.height!==rows){sc.width=cols;sc.height=rows;}
+  const sctx=mod._asciiSmpCtx;sctx.imageSmoothingEnabled=false;
+  if(lines){
+    const full=Math.floor(H/gap);
+    if(full) sctx.drawImage(srcCanvas,0,0,W,full*gap,0,0,W,full);
+    if(full<rows) sctx.drawImage(srcCanvas,0,full*gap,W,1,0,full,W,1);
+  } else sctx.drawImage(srcCanvas,0,0,cols*cs,rows*cs,0,0,cols,rows);
+  const s=sctx.getImageData(0,0,cols,rows).data;
+  // shape masks, cached per mode + cell size
+  const akey=id+'|'+cs;
+  let at=mod._asciiAtlas;
+  if(!at||at.key!==akey) at=mod._asciiAtlas={key:akey,e:[]};
+  const E=at.e;
+  // output frame: opaque black, shapes composited in draw order
+  let img=mod._asciiImg;
+  if(!img||img.width!==W||img.height!==H) img=mod._asciiImg=new ImageData(W,H);
+  const o=img.data;new Uint32Array(o.buffer).fill(0xff000000);
+  const chars=_ASCII_SETS[id];
+  const font=id==='ascii'?`bold ${cs}px monospace`:id==='binary'?`bold ${Math.max(6,cs-2)}px monospace`:`${cs}px monospace`;
+  for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
+    const si=(row*cols+col)*4,r=s[si],g=s[si+1],b=s[si+2];
+    const lum=(r*0.299+g*0.587+b*0.114)/255;
+    let k,ax=col*cs,ay=row*cs;
+    if(chars) k=id==='binary'?(lum>0.5?1:0):Math.floor((1-lum)*(chars.length-1));
+    else if(id==='halftone') k=Math.round(lum*cs*0.52*8);
+    else if(id==='crosses') k=Math.round(lum*cs*0.9)+1;
+    else {k=Math.round(lum*gap*0.9)+1;ax=col;ay=row*gap;} // lines
+    let e=E[k];
+    if(e===undefined){
+      if(chars){const ch=chars[k];e=_asciiMask((c,pd)=>{c.font=font;c.fillText(ch,pd,pd);},32);}
+      else if(id==='halftone') e=k?_asciiMask((c,pd)=>{c.beginPath();c.arc(pd+cs/2,pd+cs/2,k/8,0,Math.PI*2);c.fill();},32):null;
+      else if(id==='crosses') e=_asciiMask((c,pd)=>{const m=pd+cs/2;c.fillRect(m-k/2,m-1,k,2);c.fillRect(m-1,m-k/2,2,k);},32);
+      else e=_asciiMask((c,pd)=>{c.fillRect(pd,pd+(gap-k)/2,1,k);},32);
+      E[k]=e;
+    }
+    if(e) _asciiBlend(o,e,ax,ay,r,g,b);
   }
-
-  if(mod.intensity<1){
-    const tmp=mod.offCtx.getImageData(0,0,W,H);
-    mod.offCtx.drawImage(srcCanvas,0,0,W,H);
-    mod.offCtx.globalAlpha=mod.intensity;mod.offCtx.putImageData(tmp,0,0);mod.offCtx.globalAlpha=1;
+  // intensity: draw the effect over the source (putImageData ignores globalAlpha, so the knob did nothing)
+  const t=mod.intensity,ctx=mod.offCtx;
+  if(t>=1) ctx.putImageData(img,0,0);
+  else{
+    let fc=mod._asciiCv;
+    if(!fc){fc=mod._asciiCv=document.createElement('canvas');mod._asciiCvCtx=fc.getContext('2d');}
+    if(fc.width!==W||fc.height!==H){fc.width=W;fc.height=H;}
+    mod._asciiCvCtx.putImageData(img,0,0);
+    ctx.drawImage(srcCanvas,0,0,W,H);
+    ctx.globalAlpha=t;ctx.drawImage(fc,0,0);ctx.globalAlpha=1;
   }
+  mod._lastResult=mod.offscreen;
   return mod.offscreen;
 }
 
@@ -4914,9 +4959,9 @@ const PERLIN_FX=[
   {id:'cellular',label:['cellular',''],     param:'scale',  desc:'voronoi-like distance field'}
 ];
 
-function samplePerlin(mod){
+function samplePerlin(mod,k){
   const t=performance.now()*0.001;
-  const speed=0.05+mod.intensity*0.8;
+  const speed=(0.05+mod.intensity*0.8)*(k??1);
   const p=mod.param;
   if(!mod.pn)mod.pn={tx:0,ty:100,wx:0,wy:0,wfx:0,wfy:0};
   const pn=mod.pn;
@@ -4952,9 +4997,9 @@ function samplePerlin(mod){
       val=perlinFbm(pn.tx,pn.ty,oct,2.0,0.5)*0.5+0.5;
       break;}
     case 'warpfb':{
-      const amt=p*3+0.5;
-      pn.wfx+=perlinNoise2d(pn.wfx*0.3+t*speed*0.2,pn.wfy*0.3)*0.015*amt;
-      pn.wfy+=perlinNoise2d(pn.wfx*0.3+9.1,pn.wfy*0.3+t*speed*0.2)*0.015*amt;
+      const amt=(p*3+0.5)*(k??1),sp=0.05+mod.intensity*0.8;
+      pn.wfx+=perlinNoise2d(pn.wfx*0.3+t*sp*0.2,pn.wfy*0.3)*0.015*amt;
+      pn.wfy+=perlinNoise2d(pn.wfx*0.3+9.1,pn.wfy*0.3+t*sp*0.2)*0.015*amt;
       // soft-clamp to prevent runaway
       pn.wfx=Math.tanh(pn.wfx*0.1)*10;
       pn.wfy=Math.tanh(pn.wfy*0.1)*10;
@@ -4982,44 +5027,34 @@ function samplePerlin(mod){
 }
 
 function tickPerlin(){
+  const k=_modStep();
   state.modules.forEach(mod=>{
     if(mod.name!=='perlin'||mod.enabled===false) return;
-    const val=samplePerlin(mod);
+    const val=samplePerlin(mod,k);
     applyLfoTarget(mod,val);
+    _histPush(mod,val);
     drawPerlinViz(mod,val);
   });
 }
 
 function drawPerlinViz(mod,val){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
-  if(!mod.pnHistory)mod.pnHistory=[];
-  mod.pnHistory.push(val);
-  if(mod.pnHistory.length>w)mod.pnHistory.shift();
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const cv=ctx.canvas,w=cv.width,h=cv.height;
   ctx.clearRect(0,0,w,h);
   // filled area under curve
-  const grad=ctx.createLinearGradient(0,0,0,h);
-  grad.addColorStop(0,'rgba(255,255,255,0.25)');
-  grad.addColorStop(1,'rgba(255,255,255,0.0)');
-  ctx.fillStyle=grad;
+  if(!cv._pnGrad||cv._pnGradH!==h){
+    const grad=ctx.createLinearGradient(0,0,0,h);
+    grad.addColorStop(0,'rgba(255,255,255,0.25)');
+    grad.addColorStop(1,'rgba(255,255,255,0.0)');
+    cv._pnGrad=grad;cv._pnGradH=h;
+  }
+  ctx.fillStyle=cv._pnGrad;
   ctx.beginPath();
-  mod.pnHistory.forEach((v,i)=>{
-    const x=i*(w/mod.pnHistory.length),y=h-(v*(h-4)+2);
-    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
-  });
-  ctx.lineTo((mod.pnHistory.length-1)*(w/mod.pnHistory.length),h);
-  ctx.lineTo(0,h);
-  ctx.closePath();
-  ctx.fill();
+  const n=_histPath(ctx,mod,w,h);
+  if(n){ctx.lineTo((n-1)*(w/n),h);ctx.lineTo(0,h);ctx.closePath();ctx.fill();}
   // line
   ctx.strokeStyle='rgba(255,255,255,0.9)';ctx.lineWidth=1.5;ctx.beginPath();
-  mod.pnHistory.forEach((v,i)=>{
-    const x=i*(w/mod.pnHistory.length),y=h-(v*(h-4)+2);
-    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
-  });
+  _histPath(ctx,mod,w,h);
   ctx.stroke();
   // current dot
   const cy=h-(val*(h-4)+2);
@@ -5038,6 +5073,9 @@ const RANDWALK_FX=[
   {id:'brownian',label:['brownian',''],     param:'range'}
 ];
 function tickRandomWalks(){
+  // continuous-time form of the old per-frame step (identical at k=1): kicks scale with sqrt(k),
+  // damping with pow(d,k), drift with k
+  const k=_modStep(),kr=Math.sqrt(k);
   state.modules.forEach(mod=>{
     if(mod.name!=='randwalk'||mod.enabled===false) return;
     if(mod.rwVal===undefined) mod.rwVal=0.5;
@@ -5045,95 +5083,96 @@ function tickRandomWalks(){
     const fx=RANDWALK_FX[mod.activeFx];
     const speed=0.001+mod.intensity*0.02;
     const range=mod.param;
+    let dx=null;
     switch(fx?.id){
       case 'slow':
-        mod.rwVel+=(Math.random()-0.5)*speed*0.3;
-        mod.rwVel*=0.97;
+        mod.rwVel+=(Math.random()-0.5)*speed*0.3*kr;
+        mod.rwVel*=Math.pow(0.97,k);
         break;
       case 'medium':
-        mod.rwVel+=(Math.random()-0.5)*speed;
-        mod.rwVel*=0.95;
+        mod.rwVel+=(Math.random()-0.5)*speed*kr;
+        mod.rwVel*=Math.pow(0.95,k);
         break;
       case 'fast':
-        mod.rwVel+=(Math.random()-0.5)*speed*3;
-        mod.rwVel*=0.9;
+        mod.rwVel+=(Math.random()-0.5)*speed*3*kr;
+        mod.rwVel*=Math.pow(0.9,k);
         break;
       case 'stepped':
-        if(!mod.rwStepTimer) mod.rwStepTimer=0;
-        mod.rwStepTimer++;
+        mod.rwStepTimer=(mod.rwStepTimer||0)+k;
         if(mod.rwStepTimer>Math.round(20/mod.intensity)){
           mod.rwVal=Math.random()*range+(0.5-range/2);
           mod.rwStepTimer=0;
         }
         applyLfoTarget(mod,Math.max(0,Math.min(1,mod.rwVal)));
+        _histPush(mod,mod.rwVal);
         drawRandWalkViz(mod);
         return;
       case 'drunk':
-        mod.rwVel=(Math.random()-0.5)*speed*4;
+        mod.rwVel=(Math.random()-0.5)*speed*4;dx=mod.rwVel*kr;
         break;
       case 'pendulum':{
-        if(!mod.rwAngle) mod.rwAngle=0;
-        mod.rwAngle+=speed*8;
+        mod.rwAngle=(mod.rwAngle||0)+speed*8*k;
         mod.rwVal=0.5+Math.sin(mod.rwAngle)*range*0.5;
         applyLfoTarget(mod,Math.max(0,Math.min(1,mod.rwVal)));
+        _histPush(mod,mod.rwVal);
         drawRandWalkViz(mod);
         return;}
       case 'gravity':{
         const center=mod.param;
-        mod.rwVel+=(center-mod.rwVal)*0.05+(Math.random()-0.5)*speed*2;
-        mod.rwVel*=0.92;
+        mod.rwVel+=(center-mod.rwVal)*0.05*k+(Math.random()-0.5)*speed*2*kr;
+        mod.rwVel*=Math.pow(0.92,k);
         break;}
       case 'brownian':
-        mod.rwVel=(Math.random()-0.5)*speed*2;
+        mod.rwVel=(Math.random()-0.5)*speed*2;dx=mod.rwVel*kr;
         break;
     }
-    mod.rwVal=Math.max(0,Math.min(1,mod.rwVal+mod.rwVel));
+    mod.rwVal=Math.max(0,Math.min(1,mod.rwVal+(dx??mod.rwVel*k)));
     // soft bounce at boundaries
     if(mod.rwVal<=0||mod.rwVal>=1) mod.rwVel*=-0.8;
     applyLfoTarget(mod,mod.rwVal);
+    _histPush(mod,mod.rwVal);
     drawRandWalkViz(mod);
   });
 }
 function drawRandWalkViz(mod){
-  const cv=document.getElementById('cv-'+mod.id);
-  if(!cv||!cv.offsetWidth) return;
-  const w=cv.offsetWidth,h=Math.round(w*9/16);
-  if(cv.width!==w){cv.width=w;cv.height=h;}
-  const ctx=cv.getContext('2d');
-  if(!mod.rwHistory) mod.rwHistory=[];
-  mod.rwHistory.push(mod.rwVal||0.5);
-  if(mod.rwHistory.length>w) mod.rwHistory.shift();
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const w=ctx.canvas.width,h=ctx.canvas.height;
   ctx.clearRect(0,0,w,h);
   ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=1.5;ctx.beginPath();
-  mod.rwHistory.forEach((v,i)=>{
-    const x=i*(w/mod.rwHistory.length),y=h-(v*(h-4)+2);
-    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
-  });
+  _histPath(ctx,mod,w,h);
   ctx.stroke();
   // current dot
-  const cy=h-((mod.rwVal||0.5)*(h-4)+2);
+  const cy=h-((mod.rwVal??0.5)*(h-4)+2);
   ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(w-2,cy,3,0,Math.PI*2);ctx.fill();
 }
 
 /* ── XY PAD ENGINE ── */
 function tickXYPads(){
+  _modStep();
   // XY pad values applied continuously if they have targets
   state.modules.forEach(mod=>{
     if(mod.name!=='xypad'||mod.enabled===false) return;
     if(mod.xyX===undefined){mod.xyX=0.5;mod.xyY=0.5;}
     if(mod.xyTargetX) applyLfoTargetNamed(mod.xyTargetX,mod.xyX*mod.param);
     if(mod.xyTargetY) applyLfoTargetNamed(mod.xyTargetY,(1-mod.xyY)*mod.param);
+    // redraw on ui ticks: renderFrame paints the chain thumbnail into every module canvas
+    drawXYViz(mod);
   });
 }
 function applyLfoTargetNamed(target,val){
   if(!target||!target.targetId) return;
   const{targetId,targetKnob}=target;
-  if(targetId==='xfade'){setXfade(Math.round(val*100));document.getElementById('mxf').value=Math.round(val*100);return;}
+  if(targetId==='xfade'){setXfade(Math.round(val*100),true);return;}
   const tmod=state.modules.find(m=>m.id===targetId);
   if(!tmod) return;
   if(targetKnob==='r'||targetKnob==='g'||targetKnob==='b'){if(!tmod.channelGain)tmod.channelGain={r:1,g:1,b:1};tmod.channelGain[targetKnob]=val;return;}
-  const k=targetKnob==='intensity'?'int':'par';
-  if(targetKnob==='intensity')tmod.intensity=val; else tmod.param=val;
+  const isInt=targetKnob==='intensity';
+  if(isInt)tmod.intensity=val; else tmod.param=val;
+  // touch the knob dom only when the shown value moves (was 3 style writes per modulator per frame)
+  const q=Math.round(val*1000),qk=isInt?'_uiInt':'_uiPar';
+  if(tmod[qk]===q) return;
+  tmod[qk]=q;
+  const k=isInt?'int':'par';
   const el=document.getElementById(k+'-val-'+targetId);const fill=document.getElementById(k+'-fill-'+targetId);const thumb=document.getElementById(k+'-thumb-'+targetId);
   if(el)el.textContent=Math.round(val*100)+'%';if(fill)fill.style.width=(val*100)+'%';if(thumb)thumb.style.left=(val*100)+'%';
 }
@@ -5143,14 +5182,6 @@ function buildXYRouting(modId){
   const container=document.getElementById('xy-routing-'+modId); if(!container) return;
   const idx=state.modules.findIndex(m=>m.id===modId);
   const upstream=idx>0?state.modules[idx-1]:null;
-  let opts=`<option value="">— none —</option><option value="xfade">MIXER — crossfade</option>`;
-  if(upstream&&!['LFO','envelope','audio','sequencer','xypad','perlin','randwalk'].includes(upstream.name)){
-    opts+=`<option value="${upstream.id}__intensity">${upstream.name.toUpperCase()} — intensity</option>`;
-    opts+=`<option value="${upstream.id}__param">${upstream.name.toUpperCase()} — parameters</option>`;
-    opts+=`<option value="${upstream.id}__r">${upstream.name.toUpperCase()} — red</option>`;
-    opts+=`<option value="${upstream.id}__g">${upstream.name.toUpperCase()} — green</option>`;
-    opts+=`<option value="${upstream.id}__b">${upstream.name.toUpperCase()} — blue</option>`;
-  }
   const curX=mod.xyTargetX,curY=mod.xyTargetY;
   const xVal=curX?(curX.targetId==='xfade'?'xfade':curX.targetId+'__'+curX.targetKnob):'';
   const yVal=curY?(curY.targetId==='xfade'?'xfade':curY.targetId+'__'+curY.targetKnob):'';
@@ -5185,11 +5216,15 @@ function buildXYRouting(modId){
       const rect=cv.getBoundingClientRect();
       mod.xyX=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));
       mod.xyY=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height));
-      drawXYViz(mod);
+      drawXYViz(mod,true);
     };
-    cv.addEventListener('mousedown',e=>{cv._xyDrag=true;update(e);});
-    document.addEventListener('mousemove',e=>{if(cv._xyDrag)update(e);});
-    document.addEventListener('mouseup',()=>{cv._xyDrag=false;});
+    // document listeners live only for the drag (were added on every rebuild, never removed)
+    cv.addEventListener('mousedown',e=>{
+      update(e);
+      const up=()=>{document.removeEventListener('mousemove',update);document.removeEventListener('mouseup',up);};
+      document.addEventListener('mousemove',update);
+      document.addEventListener('mouseup',up);
+    });
   }
   drawXYViz(mod);
 }
@@ -5204,36 +5239,21 @@ function assignXYCustom(modId,axis){
   setStatus('XY '+axis.toUpperCase()+' assigned');
 }
 
-function assignXY(modId,axis){
-  const mod=state.modules.find(m=>m.id===modId); if(!mod) return;
-  const sel=document.getElementById(`xy-sel-${axis}-${modId}`); if(!sel) return;
-  const val=sel.value;
-  if(!val){if(axis==='x')mod.xyTargetX=null;else mod.xyTargetY=null;return;}
-  const target=val==='xfade'?{targetId:'xfade',targetKnob:'xfade'}:(()=>{const p=val.split('__');return{targetId:p[0],targetKnob:p[1]||'intensity'};})();
-  if(axis==='x') mod.xyTargetX=target; else mod.xyTargetY=target;
-  setStatus('XY '+axis.toUpperCase()+' → '+sel.options[sel.selectedIndex].text);
-}
-
-function drawXYViz(mod){
-  const cv=document.getElementById('cv-'+mod.id); if(!cv||!cv.offsetWidth) return;
-  const s=cv.offsetWidth;
-  if(cv.width!==s){cv.width=s;cv.height=s;}
-  const ctx=cv.getContext('2d');
+function drawXYViz(mod,force){
+  const ctx=_vizCtx(mod,true,force); if(!ctx) return;
+  const s=ctx.canvas.width;
   ctx.clearRect(0,0,s,s);
   ctx.fillStyle='#fff';ctx.fillRect(0,0,s,s);
-  const x=(mod.xyX||0.5)*s, y=(mod.xyY||0.5)*s;
+  const x=(mod.xyX??0.5)*s, y=(mod.xyY??0.5)*s;
   // crosshair lines
   ctx.strokeStyle='rgba(0,0,0,0.12)';ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,s);ctx.stroke();
   ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(s,y);ctx.stroke();
   // X axis bar — dithered black
-  ctx.save();
-  for(let px=0;px<x;px+=4){if((px/4)%2===0){ctx.fillStyle='rgba(0,0,0,0.35)';ctx.fillRect(px,s-4,2,2);ctx.fillRect(px+2,s-2,2,2);}}
-  ctx.restore();
+  ctx.fillStyle='rgba(0,0,0,0.35)';
+  for(let px=0;px<x;px+=4){if((px/4)%2===0){ctx.fillRect(px,s-4,2,2);ctx.fillRect(px+2,s-2,2,2);}}
   // Y axis bar — dithered black
-  ctx.save();
-  for(let py=0;py<y;py+=4){if((py/4)%2===0){ctx.fillStyle='rgba(0,0,0,0.35)';ctx.fillRect(0,py,2,2);ctx.fillRect(2,py+2,2,2);}}
-  ctx.restore();
+  for(let py=0;py<y;py+=4){if((py/4)%2===0){ctx.fillRect(0,py,2,2);ctx.fillRect(2,py+2,2,2);}}
   // dot
   ctx.fillStyle='#000';ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();
 }
@@ -5250,90 +5270,71 @@ const LFO_SHAPES=[
   {id:'burst',   label:['burst','']}
 ];
 
-function lfoWave(shape, phase, mod){
+// random shapes are a pure function of (cycle, phase) so the viz can draw ahead without touching state
+// (the viz called the stateful generator w+1 times per frame, re-rolling rstep and corrupting smooth)
+function _hash01(n){n|=0;n=Math.imul(n^(n>>>16),0x45d9f3b);n=Math.imul(n^(n>>>16),0x45d9f3b);n^=n>>>16;return (n>>>0)/4294967296;}
+function _lfoSeed(mod){return mod._lfoSeed??(mod._lfoSeed=(Math.random()*0x7fffffff)|0);}
+function _lfoSmoothTarget(mod,cyc){return cyc===0?0.5:_hash01(_lfoSeed(mod)+cyc*7919+13);}
+function lfoWave(shape, phase, mod, cyc){
   switch(shape){
     case 'sine':     return (Math.sin(phase*Math.PI*2)+1)/2;
     case 'square':   return phase<0.5?1:0;
     case 'saw':      return phase;
     case 'rsaw':     return 1-phase;
     case 'triangle': return phase<0.5?phase*2:2-phase*2;
-    case 'rstep':
-      if(!mod._lfoRstep||Math.floor(phase*8)!==mod._lfoRstepLast){
-        mod._lfoRstep=Math.random();
-        mod._lfoRstepLast=Math.floor(phase*8);
-      }
-      return mod._lfoRstep;
-    case 'smooth':
-      if(!mod._lfoSmooth) mod._lfoSmooth={v:0.5,t:0.5,s:0};
-      if(phase<mod._lfoSmooth.s) mod._lfoSmooth.t=Math.random();
-      mod._lfoSmooth.s=phase;
-      mod._lfoSmooth.v+=(mod._lfoSmooth.t-mod._lfoSmooth.v)*0.05;
-      return mod._lfoSmooth.v;
+    case 'rstep':    return _hash01(_lfoSeed(mod)+(cyc??mod._lfoCyc??0)*8+Math.floor(phase*8));
+    case 'smooth':   return mod._lfoSmooth?mod._lfoSmooth.v:0.5; // advanced in tickLFOs
     case 'burst':    return Math.pow(Math.sin(phase*Math.PI),8);
     default:         return (Math.sin(phase*Math.PI*2)+1)/2;
   }
 }
 
 function tickLFOs(){
+  const k=_modStep();
   state.modules.forEach(mod=>{
     if(mod.name!=='LFO'||mod.enabled===false) return;
     if(!mod.lfoPhase) mod.lfoPhase=0;
     const rate=0.02+mod.intensity*3;
-    mod.lfoPhase=(mod.lfoPhase+rate/60)%1;
-    const raw=lfoWave(LFO_SHAPES[mod.activeFx]?.id||'sine',mod.lfoPhase,mod);
+    const shape=LFO_SHAPES[mod.activeFx]?.id||'sine';
+    const ph=mod.lfoPhase+rate/60*k;
+    if(ph>=1) mod._lfoCyc=(mod._lfoCyc||0)+Math.floor(ph);
+    mod.lfoPhase=ph%1;
+    if(shape==='smooth'){const sm=mod._lfoSmooth||(mod._lfoSmooth={v:0.5});sm.v+=(_lfoSmoothTarget(mod,mod._lfoCyc||0)-sm.v)*(1-Math.pow(0.95,k));}
+    const raw=lfoWave(shape,mod.lfoPhase,mod);
     applyLfoTarget(mod,raw*mod.param);
-    // draw waveform visualizer
-    const cv=document.getElementById('cv-'+mod.id);
-    if(cv&&cv.offsetWidth){
-      const w=cv.offsetWidth,h=Math.round(cv.offsetWidth*9/16);
-      if(cv.width!==w){cv.width=w;cv.height=h;}
-      const ctx=cv.getContext('2d');
-      ctx.clearRect(0,0,w,h);
-      // draw full wave
-      ctx.strokeStyle='rgba(255,255,255,0.6)';
-      ctx.lineWidth=1.5;
-      ctx.beginPath();
-      for(let i=0;i<=w;i++){
-        const ph=(mod.lfoPhase+i/w)%1;
-        const v=lfoWave(LFO_SHAPES[mod.activeFx]?.id||'sine',ph,mod);
-        const y=h-(v*mod.param*(h-6)+3);
-        i===0?ctx.moveTo(i,y):ctx.lineTo(i,y);
-      }
-      ctx.stroke();
-      // current position dot
-      const curY=h-((raw*mod.param)*(h-6)+3);
-      ctx.fillStyle='#fff';
-      ctx.beginPath();
-      ctx.arc(0,curY,3,0,Math.PI*2);
-      ctx.fill();
-    }
+    drawLfoViz(mod,shape,raw,rate);
   });
+}
+function drawLfoViz(mod,shape,raw,rate){
+  const ctx=_vizCtx(mod); if(!ctx) return;
+  const w=ctx.canvas.width,h=ctx.canvas.height,cyc=mod._lfoCyc||0;
+  ctx.clearRect(0,0,w,h);
+  // draw one full cycle ahead of the current phase
+  ctx.strokeStyle='rgba(255,255,255,0.6)';
+  ctx.lineWidth=1.5;
+  ctx.beginPath();
+  // smooth: run the follower forward on a local copy, at the real per-frame rate
+  let sv=mod._lfoSmooth?mod._lfoSmooth.v:0.5;
+  const coef=1-Math.pow(0.95,60/(rate*w));
+  for(let i=0;i<=w;i++){
+    const p=mod.lfoPhase+i/w,c=cyc+Math.floor(p);
+    let v;
+    if(shape==='smooth'){if(i>0)sv+=(_lfoSmoothTarget(mod,c)-sv)*coef;v=sv;}
+    else v=lfoWave(shape,p%1,mod,c);
+    const y=h-(v*mod.param*(h-6)+3);
+    i===0?ctx.moveTo(i,y):ctx.lineTo(i,y);
+  }
+  ctx.stroke();
+  // current position dot
+  const curY=h-((raw*mod.param)*(h-6)+3);
+  ctx.fillStyle='#fff';
+  ctx.beginPath();
+  ctx.arc(0,curY,3,0,Math.PI*2);
+  ctx.fill();
 }
 
 function applyLfoTarget(mod,val){
-  if(!mod.lfoTarget) return;
-  const{targetId,targetKnob}=mod.lfoTarget;
-  if(targetId==='xfade'){
-    setXfade(Math.round(val*100));
-    document.getElementById('mxf').value=Math.round(val*100);
-    return;
-  }
-  const target=state.modules.find(m=>m.id===targetId);
-  if(!target) return;
-  if(targetKnob==='r'||targetKnob==='g'||targetKnob==='b'){
-    if(!target.channelGain) target.channelGain={r:1,g:1,b:1};
-    target.channelGain[targetKnob]=val;
-    return;
-  }
-  const k=targetKnob==='intensity'?'int':'par';
-  if(targetKnob==='intensity') target.intensity=val;
-  else target.param=val;
-  const el=document.getElementById(k+'-val-'+targetId);
-  const fill=document.getElementById(k+'-fill-'+targetId);
-  const thumb=document.getElementById(k+'-thumb-'+targetId);
-  if(el) el.textContent=Math.round(val*100)+'%';
-  if(fill) fill.style.width=(val*100)+'%';
-  if(thumb) thumb.style.left=(val*100)+'%';
+  if(mod.lfoTarget) applyLfoTargetNamed(mod.lfoTarget,val);
 }
 
 function buildLfoRouting(modId){
@@ -5341,14 +5342,6 @@ function buildLfoRouting(modId){
   const container=document.getElementById('lfo-routing-'+modId); if(!container) return;
   const idx=state.modules.findIndex(m=>m.id===modId);
   const upstream=idx>0?state.modules[idx-1]:null;
-  let opts=`<option value="">— pick a target —</option><option value="xfade">MIXER — crossfade</option>`;
-  if(upstream&&!['LFO','envelope','audio','sequencer','perlin','randwalk'].includes(upstream.name)){
-    opts+=`<option value="${upstream.id}__intensity">${upstream.name.toUpperCase()} — intensity</option>`;
-    opts+=`<option value="${upstream.id}__param">${upstream.name.toUpperCase()} — parameters</option>`;
-    opts+=`<option value="${upstream.id}__r">${upstream.name.toUpperCase()} — red</option>`;
-    opts+=`<option value="${upstream.id}__g">${upstream.name.toUpperCase()} — green</option>`;
-    opts+=`<option value="${upstream.id}__b">${upstream.name.toUpperCase()} — blue</option>`;
-  }
   const current=mod.lfoTarget;
   const curVal=current?(current.targetId==='xfade'?'xfade':current.targetId+'__'+current.targetKnob):'';
   const isAssigned=!!current&&!!curVal;
@@ -5393,19 +5386,13 @@ function assignLfoCustom(modId){
   setStatus('LFO assigned');
 }
 
-function assignLfo(modId){
-  const mod=state.modules.find(m=>m.id===modId); if(!mod) return;
-  const sel=document.getElementById('lfo-sel-'+modId); if(!sel) return;
-  const val=sel.value;
-  if(!val){mod.lfoTarget=null; buildLfoRouting(modId); return;}
-  if(val==='xfade'){mod.lfoTarget={targetId:'xfade',targetKnob:'xfade'};}
-  else{const parts=val.split('__');mod.lfoTarget={targetId:parts[0],targetKnob:parts[1]||'intensity'};}
-  buildLfoRouting(modId);
-  setStatus('LFO assigned to '+sel.options[sel.selectedIndex].text);
-}
-
 /* ── GLITCH MODULES ── */
 
+// one-row scratch (all VHS remaps read only within the current row); re-sized with the resolution
+function _rowScratch(mod){const n=W*4;if(!mod._row||mod._row.length!==n)mod._row=new Uint8ClampedArray(n);return mod._row;}
+// geometric skip to the next pixel hit with probability pr: same distribution as one Math.random()
+// per pixel, ~pr as many calls
+function _geoSkip(lq){return 1+Math.floor(Math.log(1-Math.random())/lq);}
 function processVhsModule(mod,srcCanvas){
   if(GLProcessor.ready()){
     const GL_VHS={0:'vhs_colorbleed',1:'vhs_lumawobble',2:'vhs_chromashift',3:'vhs_headswitch',4:'vhs_tracking'};
@@ -5415,11 +5402,13 @@ function processVhsModule(mod,srcCanvas){
       if(r) return r;
     }
   }
+  if(_shouldSkipHeavy(mod)) return mod._lastResult;
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
   const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
   const time=performance.now()*0.001;
+  const row=_rowScratch(mod),rw=W*4;
 
   // tracking tears (fx4, fx7)
   if(fx===4||fx===7){
@@ -5428,10 +5417,10 @@ function processVhsModule(mod,srcCanvas){
       const y=Math.floor(Math.random()*H);
       const shift=Math.floor((Math.random()-0.5)*40*t);
       const height=Math.floor(Math.random()*6)+1;
-      for(let row=y;row<Math.min(y+height,H);row++){
+      for(let r=y;r<Math.min(y+height,H);r++){
         for(let x=0;x<W;x++){
           const srcX=((x+shift)%W+W)%W;
-          const si=(row*W+srcX)*4; const di=(row*W+x)*4;
+          const si=(r*W+srcX)*4; const di=(r*W+x)*4;
           d[di]=d[si];d[di+1]=d[si+1];d[di+2]=d[si+2];
         }
       }
@@ -5440,12 +5429,13 @@ function processVhsModule(mod,srcCanvas){
 
   // color bleed (fx0, fx7)
   if(fx===0||fx===7){
-    const bleed=Math.floor(p*20*t)+1;
-    const tmp=new Uint8ClampedArray(d);
-    for(let i=0;i<d.length;i+=4){
-      const x=Math.floor(i/4)%W;
-      if(x+bleed<W) d[i]=tmp[i+bleed*4];
-      if(x-bleed>=0) d[i+2]=tmp[i-bleed*4+2];
+    const bleed=Math.floor(p*20*t)+1,b4=bleed*4;
+    for(let y=0;y<H;y++){
+      const o=y*rw; row.set(d.subarray(o,o+rw));
+      for(let x=0,j=0;x<W;x++,j+=4){
+        if(x+bleed<W) d[o+j]=row[j+b4];
+        if(x-bleed>=0) d[o+j+2]=row[j-b4+2];
+      }
     }
   }
 
@@ -5454,25 +5444,25 @@ function processVhsModule(mod,srcCanvas){
     const amp=p*0.4*t;
     for(let y=0;y<H;y++){
       const wobble=1+(Math.sin(y*0.15+time*4)*amp);
-      for(let x=0;x<W;x++){
-        const i=(y*W+x)*4;
-        d[i]=Math.min(255,d[i]*wobble);
-        d[i+1]=Math.min(255,d[i+1]*wobble);
-        d[i+2]=Math.min(255,d[i+2]*wobble);
+      for(let i=y*rw,e=i+rw;i<e;i+=4){
+        d[i]=d[i]*wobble;
+        d[i+1]=d[i+1]*wobble;
+        d[i+2]=d[i+2]*wobble;
       }
     }
   }
 
   // tape crinkle (fx6, fx7)
   if(fx===6||fx===7){
-    const tmp=new Uint8ClampedArray(d);
     for(let y=0;y<H;y++){
       const crinkle=Math.sin(y*0.3+time*2)*p*8*t;
       const compress=1+Math.sin(y*0.05+time)*p*0.15*t;
+      const o=y*rw; row.set(d.subarray(o,o+rw));
       for(let x=0;x<W;x++){
-        const srcX=Math.floor(((x*compress+crinkle)%W+W)%W);
-        const di=(y*W+x)*4; const si=(y*W+srcX)*4;
-        d[di]=tmp[si];d[di+1]=tmp[si+1];d[di+2]=tmp[si+2];
+        // v stays in (-W,2W): one wrap is exact and replaces two % per pixel
+        let v=x*compress+crinkle; if(v<0)v+=W; else if(v>=W)v-=W;
+        const di=o+x*4,si=(v|0)*4;
+        d[di]=row[si];d[di+1]=row[si+1];d[di+2]=row[si+2];
       }
     }
   }
@@ -5480,22 +5470,23 @@ function processVhsModule(mod,srcCanvas){
   // chroma shift (fx2, fx7)
   if(fx===2||fx===7){
     const shift=Math.floor(p*30*t)+1;
-    const tmp=new Uint8ClampedArray(d);
-    for(let i=0;i<d.length;i+=4){
-      const x=Math.floor(i/4)%W;
-      const y=Math.floor(i/4/W);
-      const rSrcX=Math.min(W-1,x+shift);
-      const bSrcX=Math.max(0,x-shift);
-      d[i]  =tmp[(y*W+rSrcX)*4];
-      d[i+2]=tmp[(y*W+bSrcX)*4+2];
+    for(let y=0;y<H;y++){
+      const o=y*rw; row.set(d.subarray(o,o+rw));
+      for(let x=0;x<W;x++){
+        const rSrcX=x+shift<W?x+shift:W-1;
+        const bSrcX=x-shift>0?x-shift:0;
+        d[o+x*4]=row[rSrcX*4];
+        d[o+x*4+2]=row[bSrcX*4+2];
+      }
     }
   }
 
   // static burst (fx5, fx7)
   if(fx===5||fx===7){
     const density=p*0.04*t;
-    for(let i=0;i<d.length;i+=4){
-      if(Math.random()<density){const v=Math.random()<0.5?0:255;d[i]=d[i+1]=d[i+2]=v;}
+    if(density>0){
+      const lq=Math.log(1-density),n=W*H;
+      for(let k=_geoSkip(lq)-1;k<n;k+=_geoSkip(lq)){const i=k*4,v=Math.random()<0.5?0:255;d[i]=d[i+1]=d[i+2]=v;}
     }
   }
 
@@ -5517,16 +5508,19 @@ function processVhsModule(mod,srcCanvas){
   }
 
   ctx.putImageData(imgData,0,0);
+  mod._lastResult=mod.offscreen;
   return mod.offscreen;
 }
 
+// per-module scratch copy of the frame (was a fresh W×H×4 array per frame); re-sized when the resolution changes
+function _modScratch(mod,len){if(!mod._scratch||mod._scratch.length!==len)mod._scratch=new Uint8ClampedArray(len);return mod._scratch;}
 function processBlockCorruptModule(mod,srcCanvas){
   if(_shouldSkipHeavy(mod)) return mod._lastResult;
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
   const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
-  const tmp=new Uint8ClampedArray(d);
+  const tmp=_modScratch(mod,d.length); tmp.set(d);
   const num=Math.floor(t*p*50)+2;
   if(fx===0){ // stream corrupt — horizontal band shifts
     const bandH=Math.floor(4+p*20);
@@ -5594,18 +5588,22 @@ function processBlockCorruptModule(mod,srcCanvas){
     }
   } else if(fx===6){ // freeze block — blocks get frozen then slowly release
     const bs=Math.floor(8+p*24);
-    if(!mod._freezeBlocks) mod._freezeBlocks={};
+    // cache keyed by block origin for one block size + resolution; dropped when either changes
+    // (was keyed by origin only: black pixels after a size change, and it grew forever)
+    let fb=mod._freezeBlocks;
+    if(!fb||fb.bs!==bs||fb.w!==W||fb.h!==H) fb=mod._freezeBlocks={bs,w:W,h:H,map:new Map()};
     for(let b=0;b<num;b++){
       const bx=Math.floor(Math.random()*(W/bs))*bs,by=Math.floor(Math.random()*(H/bs))*bs;
-      const key=bx+','+by;
-      if(!mod._freezeBlocks[key]||Math.random()<0.05*t){
-        const fr=[];
+      const key=by*W+bx;
+      let fr=fb.map.get(key);
+      if(!fr||Math.random()<0.05*t){
+        if(!fr){fr=new Uint8ClampedArray(bs*bs*3);fb.map.set(key,fr);}
+        let fi=0;
         for(let y=0;y<bs&&by+y<H;y++)for(let x=0;x<bs&&bx+x<W;x++){
-          const si=((by+y)*W+(bx+x))*4;fr.push(tmp[si],tmp[si+1],tmp[si+2]);
+          const si=((by+y)*W+(bx+x))*4;fr[fi++]=tmp[si];fr[fi++]=tmp[si+1];fr[fi++]=tmp[si+2];
         }
-        mod._freezeBlocks[key]=fr;
       }
-      const fr=mod._freezeBlocks[key];let fi=0;
+      let fi=0;
       for(let y=0;y<bs&&by+y<H;y++)for(let x=0;x<bs&&bx+x<W;x++){
         const di=((by+y)*W+(bx+x))*4;d[di]=fr[fi++];d[di+1]=fr[fi++];d[di+2]=fr[fi++];
       }
@@ -5650,8 +5648,8 @@ function processRowShiftModule(mod,srcCanvas){
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
   const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
-  const tmp=new Uint8ClampedArray(d);
-  if(!mod._rowSeeds) mod._rowSeeds=Array.from({length:H},()=>Math.random());
+  const tmp=_modScratch(mod,d.length); tmp.set(d);
+  if(!mod._rowSeeds||mod._rowSeeds.length!==H){mod._rowSeeds=new Float32Array(H);for(let y=0;y<H;y++)mod._rowSeeds[y]=Math.random();}
   const time=performance.now()*0.001;
 
   if(fx===0){ // interlace — even/odd rows shift in opposite directions
@@ -5774,133 +5772,104 @@ function processRowShiftModule(mod,srcCanvas){
 }
 
 
+// pixel sort works on typed arrays: runs above/below the threshold are sorted by a 16-bit quantized key
+// (1/256 luma step) with a stable radix/insertion sort. column passes run on a transposed copy so every
+// run is contiguous. was ~410k {r,g,b} objects + comparator sorts per frame (13-100ms).
+function _psScratch(mod,L,N){
+  let ps=mod._ps;
+  if(!ps||ps.L<L||ps.key.length!==N) ps=mod._ps={L,key:new Float32Array(N),tr:null,px:new Int32Array(L),q:new Uint16Array(L),tq:new Uint16Array(L),tp:new Int32Array(L),cnt:new Uint32Array(514)};
+  return ps;
+}
+// sort key of a packed rgba pixel: 0 luma, 1 saturation, 2 hue (all 0..255)
+function _psKey(v,kind){
+  const r=v&255,g=(v>>>8)&255,b=(v>>>16)&255;
+  if(kind===0) return 0.299*r+0.587*g+0.114*b;
+  const max=r>g?(r>b?r:b):(g>b?g:b),min=r<g?(r<b?r:b):(g<b?g:b),dd=max-min;
+  if(kind===1) return max===0?0:dd/max*255;
+  if(dd===0) return 0;
+  const h=max===r?(g-b)/dd%6:max===g?(b-r)/dd+2:(r-g)/dd+4;
+  return ((h*60)+360)%360/360*255;
+}
+// dst[x*h+y]=src[y*w+x], in 16×16 tiles
+function _psTranspose(src,dst,w,h){
+  for(let y0=0;y0<h;y0+=16){const y1=Math.min(h,y0+16);
+    for(let x0=0;x0<w;x0+=16){const x1=Math.min(w,x0+16);
+      for(let y=y0;y<y1;y++){for(let x=x0,si=y*w+x0,di=x0*h+y;x<x1;x++,si++,di+=h)dst[di]=src[si];}}}
+}
+// stable sort of px[a,b) by q[a,b), ascending
+function _psSortRange(ps,a,b){
+  const q=ps.q,px=ps.px,n=b-a;
+  if(n<48){
+    for(let i=a+1;i<b;i++){const kq=q[i],kp=px[i];let j=i-1;while(j>=a&&q[j]>kq){q[j+1]=q[j];px[j+1]=px[j];j--;}q[j+1]=kq;px[j+1]=kp;}
+    return;
+  }
+  // lsd radix, both byte histograms in one pass; skip when already ordered or a byte is constant
+  const tq=ps.tq,tp=ps.tp,c=ps.cnt;
+  c.fill(0);
+  let sorted=true,prev=0;
+  for(let i=a;i<b;i++){const v=q[i];if(v<prev)sorted=false;prev=v;c[(v&255)+1]++;c[(v>>8)+258]++;}
+  if(sorted) return;
+  const lowOne=c[(q[a]&255)+1]===n,highOne=c[(q[a]>>8)+258]===n;
+  for(let i=1;i<257;i++){c[i]+=c[i-1];c[i+257]+=c[i+256];}
+  if(!lowOne&&!highOne){
+    for(let i=a;i<b;i++){const v=q[i],o=c[v&255]++;tq[o]=v;tp[o]=px[i];}
+    for(let i=0;i<n;i++){const v=tq[i],o=a+c[(v>>8)+257]++;q[o]=v;px[o]=tp[i];}
+  } else {
+    // one pass on the byte that varies, then copy back
+    if(highOne) for(let i=a;i<b;i++){const v=q[i],o=c[v&255]++;tq[o]=v;tp[o]=px[i];}
+    else for(let i=a;i<b;i++){const v=q[i],o=c[(v>>8)+257]++;tq[o]=v;tp[o]=px[i];}
+    for(let i=0;i<n;i++){q[a+i]=tq[i];px[a+i]=tp[i];}
+  }
+}
+// sort buf[o, o+len) in place by key
+function _psRun(ps,buf,key,o,len,desc){
+  const px=ps.px,q=ps.q;
+  for(let j=0;j<len;j++){px[j]=buf[o+j];let v=(key[o+j]*256)|0;if(v>65535)v=65535;q[j]=desc?65535-v:v;}
+  _psSortRange(ps,0,len);
+  for(let j=0;j<len;j++) buf[o+j]=px[j];
+}
+// every w-long row of buf: sort runs longer than minLen that are above (or, dark, below) thresh
+function _psRows(ps,buf,w,h,minLen,thresh,kind,dark,desc){
+  const key=ps.key;
+  for(let y=0;y<h;y++){
+    const o0=y*w; let s=-1;
+    for(let x=0;x<=w;x++){
+      let inSeg=false;
+      if(x<w){const kv=key[o0+x]=_psKey(buf[o0+x],kind);inSeg=dark?kv<thresh:kv>thresh;}
+      if(inSeg){if(s<0)s=x;}
+      else if(s>=0){if(x-s>minLen)_psRun(ps,buf,key,o0+s,x-s,desc);s=-1;}
+    }
+  }
+}
 function processPixelSortModule(mod,srcCanvas){
   if(_shouldSkipHeavy(mod)) return mod._lastResult;
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
   const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
-  const luma=(r,g,b)=>0.299*r+0.587*g+0.114*b;
-  const thresh=(1-p)*255; // left=no sort (high threshold), right=max sort (low threshold)
-
-  function sortSegments(pixels, keyFn, descending, minLen){
-    // find runs where keyFn(px) > thresh, sort them
-    let segStart=-1;
-    for(let i=0;i<=pixels.length;i++){
-      const inSeg=i<pixels.length&&keyFn(pixels[i])>thresh;
-      if(inSeg&&segStart===-1) segStart=i;
-      else if(!inSeg&&segStart!==-1){
-        const len=i-segStart;
-        if(len>minLen){
-          const seg=pixels.slice(segStart,i);
-          seg.sort((a,b2)=>descending?keyFn(b2)-keyFn(a):keyFn(a)-keyFn(b2));
-          for(let k=0;k<seg.length;k++) pixels[segStart+k]=seg[k];
-        }
-        segStart=-1;
-      }
-    }
-  }
-
-  function getRow(y){
-    const row=[];
-    for(let x=0;x<W;x++){
-      const i=(y*W+x)*4;
-      row.push({r:d[i],g:d[i+1],b:d[i+2]});
-    }
-    return row;
-  }
-  function setRow(y,row){
-    for(let x=0;x<W;x++){
-      const i=(y*W+x)*4;d[i]=row[x].r;d[i+1]=row[x].g;d[i+2]=row[x].b;
-    }
-  }
-  function getCol(x){
-    const col=[];
-    for(let y=0;y<H;y++){
-      const i=(y*W+x)*4;
-      col.push({r:d[i],g:d[i+1],b:d[i+2]});
-    }
-    return col;
-  }
-  function setCol(x,col){
-    for(let y=0;y<H;y++){
-      const i=(y*W+x)*4;d[i]=col[y].r;d[i+1]=col[y].g;d[i+2]=col[y].b;
-    }
-  }
-  function getHue(px){
-    const r=px.r/255,g=px.g/255,b=px.b/255;
-    const max=Math.max(r,g,b),min=Math.min(r,g,b),d=max-min;
-    if(d===0) return 0;
-    let h=max===r?(g-b)/d%6:max===g?(b-r)/d+2:(r-g)/d+4;
-    return ((h*60)+360)%360/360*255;
-  }
-  function getSat(px){
-    const r=px.r/255,g=px.g/255,b=px.b/255;
-    const max=Math.max(r,g,b),min=Math.min(r,g,b);
-    return max===0?0:(max-min)/max*255;
-  }
-
+  const d32=new Int32Array(d.buffer,d.byteOffset,d.length>>2); // rgba little-endian: r = low byte (int32: opaque pixels stay small ints)
+  const N=W*H,thresh=(1-p)*255; // left=no sort (high threshold), right=max sort (low threshold)
   const minSegLen=Math.max(2,Math.floor((1-t)*30));
+  const ps=_psScratch(mod,Math.max(W,H),N),key=ps.key;
+  // columns: transpose, sort as rows, transpose back
+  const cols=(minLen,desc)=>{
+    const tr=ps.tr&&ps.tr.length===N?ps.tr:(ps.tr=new Int32Array(N));
+    _psTranspose(d32,tr,W,H);
+    _psRows(ps,tr,H,W,minLen,thresh,0,false,desc);
+    _psTranspose(tr,d32,H,W);
+  };
 
-  if(fx===0){ // bright sort — horiz, sort bright segments light→dark
-    for(let y=0;y<H;y++){const row=getRow(y);sortSegments(row,px=>luma(px.r,px.g,px.b),false,minSegLen);setRow(y,row);}
-  } else if(fx===1){ // dark sort — horiz, sort dark segments (below thresh) dark→light
-    for(let y=0;y<H;y++){
-      const row=getRow(y);
-      // for dark sort: find segments BELOW threshold
-      let segStart=-1;
-      for(let i=0;i<=row.length;i++){
-        const inSeg=i<row.length&&luma(row[i].r,row[i].g,row[i].b)<thresh;
-        if(inSeg&&segStart===-1) segStart=i;
-        else if(!inSeg&&segStart!==-1){
-          const len=i-segStart;
-          if(len>minSegLen){
-            const seg=row.slice(segStart,i);
-            seg.sort((a,b2)=>luma(a.r,a.g,a.b)-luma(b2.r,b2.g,b2.b));
-            for(let k=0;k<seg.length;k++) row[segStart+k]=seg[k];
-          }
-          segStart=-1;
-        }
-      }
-      setRow(y,row);
-    }
-  } else if(fx===2){ // sat sort — sort by saturation
-    for(let y=0;y<H;y++){const row=getRow(y);sortSegments(row,getSat,true,minSegLen);setRow(y,row);}
-  } else if(fx===3){ // hue sort — sort by actual hue value
-    for(let y=0;y<H;y++){const row=getRow(y);sortSegments(row,getHue,false,minSegLen);setRow(y,row);}
-  } else if(fx===4){ // horizontal — sort entire rows (no threshold segmenting)
-    for(let y=0;y<H;y++){
-      if(Math.random()<t){
-        const row=getRow(y);
-        row.sort((a,b2)=>luma(a.r,a.g,a.b)-luma(b2.r,b2.g,b2.b));
-        setRow(y,row);
-      }
-    }
+  if(fx===4){ // horizontal — sort entire rows (no threshold segmenting)
+    for(let y=0;y<H;y++) if(Math.random()<t){const o0=y*W;for(let x=0;x<W;x++)key[o0+x]=_psKey(d32[o0+x],0);_psRun(ps,d32,key,o0,W,false);}
   } else if(fx===5){ // vertical — sort bright segments top→bottom
-    for(let x=0;x<W;x++){const col=getCol(x);sortSegments(col,px=>luma(px.r,px.g,px.b),false,minSegLen);setCol(x,col);}
+    cols(minSegLen,false);
   } else if(fx===6){ // droopy — columns sort descending (bright falls to bottom), drip effect
-    for(let x=0;x<W;x++){
-      const col=getCol(x);
-      // find bright segments and sort them dark→light (bright sinks to bottom)
-      let segStart=-1;
-      for(let i=0;i<=col.length;i++){
-        const inSeg=i<col.length&&luma(col[i].r,col[i].g,col[i].b)>thresh;
-        if(inSeg&&segStart===-1) segStart=i;
-        else if(!inSeg&&segStart!==-1){
-          const len=i-segStart;
-          if(len>minSegLen){
-            const seg=col.slice(segStart,i);
-            seg.sort((a,b2)=>luma(b2.r,b2.g,b2.b)-luma(a.r,a.g,a.b)); // bright sinks
-            for(let k=0;k<seg.length;k++) col[segStart+k]=seg[k];
-          }
-          segStart=-1;
-        }
-      }
-      setCol(x,col);
-    }
+    cols(minSegLen,true);
   } else if(fx===7){ // full sort — both horiz and vert in alternating passes
-    for(let y=0;y<H;y++){const row=getRow(y);sortSegments(row,px=>luma(px.r,px.g,px.b),false,minSegLen);setRow(y,row);}
-    for(let x=0;x<W;x++){const col=getCol(x);sortSegments(col,px=>luma(px.r,px.g,px.b),false,Math.floor(minSegLen*0.5));setCol(x,col);}
+    _psRows(ps,d32,W,H,minSegLen,thresh,0,false,false);
+    cols(Math.floor(minSegLen*0.5),false);
+  } else if(fx>=0&&fx<=3){ // bright / dark / saturation (most saturated first) / hue — horizontal runs
+    _psRows(ps,d32,W,H,minSegLen,thresh,fx===2?1:fx===3?2:0,fx===1,fx===2);
   }
 
   ctx.putImageData(imgData,0,0);
@@ -5909,6 +5878,8 @@ function processPixelSortModule(mod,srcCanvas){
 }
 
 
+// per-pixel noise uses an inline xorshift32 seeded from Math.random once per frame (Math.random per channel
+// per pixel was most of the cost); sparse hits (salt & pepper, bit flip) use geometric skips
 function processSignalNoiseModule(mod,srcCanvas){
   if(GLProcessor.ready()){
     const GL_SN={0:'sn_luma',1:'sn_quantize',2:'sn_chroma',3:'sn_rgb',4:'sn_saltpepper',5:'sn_bitflip'};
@@ -5922,59 +5893,62 @@ function processSignalNoiseModule(mod,srcCanvas){
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
-  const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
-  const amount=p*t*80;
-  for(let i=0;i<d.length;i+=4){
-    if(fx===3||fx===7){ // rgb noise - independent channels
-      d[i]=Math.min(255,Math.max(0,d[i]+(Math.random()-0.5)*amount));
-      d[i+1]=Math.min(255,Math.max(0,d[i+1]+(Math.random()-0.5)*amount));
-      d[i+2]=Math.min(255,Math.max(0,d[i+2]+(Math.random()-0.5)*amount));
+  const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data,len=d.length;
+  const amount=p*t*80,R=2.3283064365386963e-10; // 1/2^32
+  let s=(Math.random()*4294967295)|1;
+  if(fx===3||fx===7||fx===0||fx===2){
+    const rgb=fx===3||fx===7,luma=fx===0||fx===7,a2=amount*0.5;
+    for(let i=0;i<len;i+=4){
+      if(rgb){ // rgb noise - independent channels
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i]=d[i]+((s>>>0)*R-0.5)*amount;
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i+1]=d[i+1]+((s>>>0)*R-0.5)*amount;
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i+2]=d[i+2]+((s>>>0)*R-0.5)*amount;
+      }
+      if(luma){ // luma noise
+        s^=s<<13;s^=s>>>17;s^=s<<5;const n=((s>>>0)*R-0.5)*a2;
+        d[i]=d[i]+n;d[i+1]=d[i+1]+n;d[i+2]=d[i+2]+n;
+      }
+      if(fx===2){ // chroma noise - only R and B channels
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i]=d[i]+((s>>>0)*R-0.5)*amount;
+        s^=s<<13;s^=s>>>17;s^=s<<5;d[i+2]=d[i+2]+((s>>>0)*R-0.5)*amount;
+      }
     }
-    if(fx===0||fx===7){ // luma noise
-      const n=(Math.random()-0.5)*amount*0.5;
-      d[i]=Math.min(255,Math.max(0,d[i]+n));
-      d[i+1]=Math.min(255,Math.max(0,d[i+1]+n));
-      d[i+2]=Math.min(255,Math.max(0,d[i+2]+n));
-    }
-    if(fx===2){ // chroma noise - only R and B channels
-      d[i]=Math.min(255,Math.max(0,d[i]+(Math.random()-0.5)*amount));
-      d[i+2]=Math.min(255,Math.max(0,d[i+2]+(Math.random()-0.5)*amount));
-    }
-    if(fx===1){ // quantize — posterize to step levels
-      const steps=Math.max(2,Math.floor((1-p)*32*t)+2);
-      const step=255/steps;
+  }
+  if(fx===1){ // quantize — posterize to step levels
+    const steps=Math.max(2,Math.floor((1-p)*32*t)+2);
+    const step=255/steps;
+    for(let i=0;i<len;i+=4){
       d[i]=Math.round(d[i]/step)*step;
       d[i+1]=Math.round(d[i+1]/step)*step;
       d[i+2]=Math.round(d[i+2]/step)*step;
     }
-    if(fx===4||fx===7){ // salt & pepper
-      if(Math.random()<p*t*0.04){d[i]=d[i+1]=d[i+2]=Math.random()<0.5?0:255;}
-    }
-    if(fx===6){ // hue drift — rotate hue by random per-pixel amount
-      const r=d[i]/255,g=d[i+1]/255,b=d[i+2]/255;
-      const max=Math.max(r,g,b),min=Math.min(r,g,b),delta=max-min;
-      if(delta>0.01){
-        let h=0;
-        if(max===r) h=(g-b)/delta%6;
-        else if(max===g) h=(b-r)/delta+2;
-        else h=(r-g)/delta+4;
-        h=(h*60+360+(Math.random()-0.5)*p*t*120)%360;
-        const s=delta/max, v=max;
-        const c=v*s,x2=c*(1-Math.abs((h/60)%2-1)),m=v-c;
+  }
+  if(fx===4||fx===7){ // salt & pepper
+    const pr=p*t*0.04;
+    if(pr>0){const lq=Math.log(1-pr),n=len>>2;for(let k=_geoSkip(lq)-1;k<n;k+=_geoSkip(lq)){const i=k*4;d[i]=d[i+1]=d[i+2]=Math.random()<0.5?0:255;}}
+  }
+  if(fx===6){ // hue drift — rotate hue by random per-pixel amount (worked in 0..255 units: c=max-min, m=min)
+    const hs=p*t*120;
+    for(let i=0;i<len;i+=4){
+      const r=d[i],g=d[i+1],b=d[i+2];
+      const max=r>g?(r>b?r:b):(g>b?g:b),min=r<g?(r<b?r:b):(g<b?g:b),c=max-min;
+      if(c>2.55){
+        // float % is a libm call in v8: the ranges are known, so wrap by subtraction instead
+        let h=max===r?(g-b)/c:max===g?(b-r)/c+2:(r-g)/c+4; // (g-b)/c is already in [-1,1]
+        s^=s<<13;s^=s>>>17;s^=s<<5;
+        h=h*60+360+((s>>>0)*R-0.5)*hs; while(h>=360)h-=360;
+        const hh=h/60,hi=hh|0,x2=c*(1-Math.abs(hh-(hi&~1)-1));
         let r2=0,g2=0,b2=0;
-        const hi=Math.floor(h/60);
         if(hi===0){r2=c;g2=x2;}else if(hi===1){r2=x2;g2=c;}
         else if(hi===2){g2=c;b2=x2;}else if(hi===3){g2=x2;b2=c;}
         else if(hi===4){r2=x2;b2=c;}else{r2=c;b2=x2;}
-        d[i]=(r2+m)*255|0;d[i+1]=(g2+m)*255|0;d[i+2]=(b2+m)*255|0;
+        d[i]=(r2+min)|0;d[i+1]=(g2+min)|0;d[i+2]=(b2+min)|0;
       }
     }
-    if(fx===5){ // bit flip
-      if(Math.random()<p*t*0.02){
-        const bit=1<<Math.floor(Math.random()*8);
-        d[i+Math.floor(Math.random()*3)]^=bit;
-      }
-    }
+  }
+  if(fx===5){ // bit flip
+    const pr=p*t*0.02;
+    if(pr>0){const lq=Math.log(1-pr),n=len>>2;for(let k=_geoSkip(lq)-1;k<n;k+=_geoSkip(lq)){const bit=1<<Math.floor(Math.random()*8);d[k*4+Math.floor(Math.random()*3)]^=bit;}}
   }
   ctx.putImageData(imgData,0,0);
   mod._lastResult=mod.offscreen;
@@ -6038,13 +6012,17 @@ function updateCapState(){
   }
 }
 
+let _modSeq=0;
+// fx-key lookup by element id — module ids from bank restore contain '.', which breaks a css selector
+function _fxKeysOf(elId){const el=document.getElementById(elId);return el?el.querySelectorAll('.fx-key'):[];}
 function addModule(name,type,color){
   const total=state.modules.length;
   const heavy=getHeavyCount();
   if(total>=MAX_TOTAL) return;
   if(HEAVY_MODULES.has(name)&&heavy>=MAX_HEAVY) return;
 
-  const id='m'+Date.now();
+  // monotonic counter: 'm'+Date.now() collided when two modules were added in the same ms
+  const id='mod'+(++_modSeq);
   state.modules.forEach(m=>{
     m.open=false;
     const ctrl=document.getElementById('ctrl-'+m.id);
@@ -6067,19 +6045,17 @@ function removeModule(id){
   // array alone leaks offscreens, feedback buffers and datamosh state
   const mod=state.modules.find(m=>m.id===id);
   if(mod){
-    if(mod.offscreen){mod.offscreen.width=mod.offscreen.height=1;}
-    mod.offscreen=null; mod.offCtx=null;
-    if(mod.fbPrev){mod.fbPrev.width=mod.fbPrev.height=1;}
-    mod.fbPrev=null;
-    if(mod._tmpB){mod._tmpB.width=mod._tmpB.height=1;}
-    mod._tmpB=null; mod._tmpBCtx=null;
-    if(mod.geomOffscreen){mod.geomOffscreen.width=mod.geomOffscreen.height=1;}
-    mod.geomOffscreen=null; mod.geomCtx=null;
-    if(mod.geomOffscreen2){mod.geomOffscreen2.width=mod.geomOffscreen2.height=1;}
-    mod.geomOffscreen2=null; mod.geomCtx2=null;
-    mod.dmosh=null; mod._cfbBuf=null; mod._lastResult=null;
+    // canvases: shrink before dropping so the backing store is freed promptly
+    ['offscreen','fbPrev','_tmpB','geomOffscreen','geomOffscreen2','_asciiSmp','_asciiCv'].forEach(k=>{if(mod[k]){mod[k].width=mod[k].height=1;}mod[k]=null;});
+    ['offCtx','fbPrevCtx','_tmpBCtx','geomCtx','geomCtx2','_asciiSmpCtx','_asciiCvCtx',
+     'dmosh','_cfbBuf','_lastResult','_scratch','_row','_ps','_freezeBlocks','_asciiImg','_asciiAtlas','_rowSeeds','_hist','pn','cv'
+    ].forEach(k=>{mod[k]=null;});
+    // routing dropdowns are appended to <body>, outside the module node
+    ['lfo-','xy-x-','xy-y-'].forEach(pf=>{const dd=document.getElementById('csel-dd-'+pf+id);if(dd)dd.remove();});
   }
   state.modules=state.modules.filter(m=>m.id!==id);
+  // last audio module gone: stop the mic and close the context now (tickAudio also catches bank switches)
+  if(mod&&mod.name==='audio'&&!state.modules.some(m=>m.name==='audio')) releaseAudio();
   rebuildSlots(); updateCapState();
 }
 
@@ -6109,9 +6085,10 @@ function setFx(modId,fxIdx){
   const mod=state.modules.find(m=>m.id===modId); if(!mod) return;
   mod.activeFx=fxIdx;
   if(mod.name==='geometry') mod.geomAngle=0;
-  if(mod.name==='LFO'){ mod.lfoPhase=0; delete mod._lfoRstep; delete mod._lfoSmooth; }
+  if(mod.name==='LFO'){ mod.lfoPhase=0; mod._lfoCyc=0; delete mod._lfoSmooth; }
   if(mod.name==='feedback'){ mod.fbPrev=null; mod.fbMirrorX=0; mod.fbFrame=0; }
-  document.querySelectorAll('#fxkeys-'+modId+' .fx-key').forEach((k,i)=>k.classList.toggle('active',i===fxIdx));
+  if(mod.name==='blockcorrupt') mod._freezeBlocks=null;
+  _fxKeysOf('fxkeys-'+modId).forEach((k,i)=>k.classList.toggle('active',i===fxIdx));
   const lbl=document.getElementById('param-lbl-'+modId);
   if(lbl){
     const map2={color:COLOR_FX,geometry:GEOM_FX,feedback:FEEDBACK_FX,pixelops:PIXELOPS_FX,ascii:ASCII_FX,keyer:KEYER_FX,randwalk:RANDWALK_FX,perlin:PERLIN_FX,vhs:null,blockcorrupt:null,rowshift:null,pixelsort:null,signalnoise:null};
@@ -6136,6 +6113,7 @@ function makeKnobDrag(modId,which){
       const r=track.getBoundingClientRect();
       const v=Math.max(0,Math.min(1,+(((ev.clientX-r.left)/r.width).toFixed(2))));
       const mod=state.modules.find(m=>m.id===modId); if(!mod)return;
+      mod._uiInt=mod._uiPar=undefined; // let modulation rewrite the knob dom after a manual drag
       if(which==='int'){mod.intensity=v; const el=document.getElementById('int-val-'+modId); if(el)el.textContent=Math.round(v*100)+'%';}
       else{mod.param=v; const el=document.getElementById('par-val-'+modId); if(el)el.textContent=Math.round(v*100)+'%';}
       const fill=document.getElementById(which+'-fill-'+modId);
@@ -6283,7 +6261,7 @@ function buildModuleHTML(mod){
           </div>
           ${isModulator?`<div id="${isXYPad?'xy':'lfo'}-routing-${mod.id}"></div>`:''}
           ${isEnv?`<div style="padding:4px 8px 8px;"><button onclick="triggerEnv('${mod.id}')" style="width:100%;background:var(--accent-dim);border:1px solid var(--accent-mid);color:var(--accent);font-family:var(--mono);font-size:9px;padding:5px;border-radius:3px;cursor:pointer;letter-spacing:0.1em;">▶ TRIGGER</button></div>`:''}
-          ${isAudio?`<div style="padding:4px 8px 8px;"><button id="audio-retry-${mod.id}" onclick="audioCtx=null;initAudio('${mod.id}')" style="display:none;width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:var(--mono);font-size:9px;padding:5px;border-radius:3px;cursor:pointer;letter-spacing:0.1em;">↺ retry mic permission</button></div>`:''}
+          ${isAudio?`<div style="padding:4px 8px 8px;"><button id="audio-retry-${mod.id}" onclick="retryAudio()" style="display:${_audioDenied?'block':'none'};width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:var(--mono);font-size:9px;padding:5px;border-radius:3px;cursor:pointer;letter-spacing:0.1em;">↺ retry mic permission</button></div>`:''}
         </div>
       </div>
     </div>`;
@@ -6291,6 +6269,7 @@ function buildModuleHTML(mod){
 
 function rebuildSlots(){
   const container=document.getElementById('mod-slots');
+  if(_vizRO) _vizRO.disconnect();
   container.innerHTML='';
   state.modules.forEach(mod=>{
     const conn=document.createElement('div');
@@ -6310,6 +6289,7 @@ function rebuildSlots(){
     const _isXYPad=mod.name==='xypad';
     const _isSeq=mod.name==='sequencer';
     const _isModulator=['LFO','envelope','audio','sequencer','xypad','perlin','randwalk'].includes(mod.name);
+    if(_isModulator&&_vizRO&&mod.cv) _vizRO.observe(mod.cv);
     if(_isModulator&&!_isXYPad) buildLfoRouting(mod.id);
     if(_isXYPad) buildXYRouting(mod.id);
     if(_isSeq) setTimeout(()=>drawSeqViz(mod),50);
