@@ -2789,10 +2789,19 @@ function buildCustomSelect(id, opts, currentVal, onChange){
 }
 
 const GLProcessor=(function(){
-  let gl=null,glCanvas=null;
-  const programs={};
-  const textures={src:null,prev:null};
-  let fbo=null,fboTex=null,fboTex2=null,currentFbo=0;
+  // gpu-resident path: every pass renders into a pooled fbo texture; the last one is drawn to the
+  // gl canvas' default framebuffer and drawImage'd (gpu→gpu, same task so no preserveDrawingBuffer
+  // needed) into a per-module accelerated 2d canvas, which run() returns. no readPixels, no row flip.
+  // chaining: if srcCanvas is the canvas the previous run() returned this frame, its texture is
+  // reused instead of re-uploading. uploads keep UNPACK_FLIP_Y, so v_uv.y=0 is the image bottom
+  // (same convention the shaders were written for) and the default framebuffer shows it upright.
+  let gl=null,glCanvas=null,_ready=false,_gen=0;
+  let programs={},vsObj=null,fbo=null,pool=[];
+  let texSrc=null,texB=null;           // upload targets {t,w,h}
+  let _lastOut=null,_lastTex=null;     // chaining: canvas returned by the last run + its texture
+  const _modGL=new WeakMap();          // per-module persistent textures (color trails)
+  const U={t:0,p:0,pi:0,k:0,time:0,cg:null,pal:null};
+  const UNIFORMS=['u_src','u_b','u_prev','u_t','u_p','u_time','u_res','u_pi','u_k','u_gain','u_pal'];
 
   const VS=`#version 300 es
   in vec2 a_pos;
@@ -2809,37 +2818,48 @@ const GLProcessor=(function(){
   in vec2 v_uv;
   out vec4 fragColor;
   `;
+  // color shaders: modulated r/g/b channel gains applied after the effect (cpu: min(255,v*g))
+  const CFS=FS_BASE+`uniform vec3 u_gain;
+  vec4 G(vec4 c){return vec4(min(c.rgb*u_gain,1.0),c.a);}
+  `;
+  const HSL=`
+      vec3 rgb2hsl(vec3 c){float mx=max(c.r,max(c.g,c.b)),mn=min(c.r,min(c.g,c.b));float l=(mx+mn)/2.0,s=0.0,h=0.0;if(mx!=mn){float d=mx-mn;s=l>0.5?d/(2.0-mx-mn):d/(mx+mn);if(mx==c.r)h=(c.g-c.b)/d+(c.g<c.b?6.0:0.0);else if(mx==c.g)h=(c.b-c.r)/d+2.0;else h=(c.r-c.g)/d+4.0;h/=6.0;}return vec3(h,s,l);}`;
+  const RAND=`
+      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}`;
 
   // ── per-effect fragment shaders ──
   const SHADERS={
+    _copy: FS_BASE+`
+      void main(){fragColor=texture(u_src,v_uv);}`,
     // COLOR
-    hue: FS_BASE+`
-      vec3 rgb2hsl(vec3 c){float mx=max(c.r,max(c.g,c.b)),mn=min(c.r,min(c.g,c.b));float l=(mx+mn)/2.0,s=0.0,h=0.0;if(mx!=mn){float d=mx-mn;s=l>0.5?d/(2.0-mx-mn):d/(mx+mn);if(mx==c.r)h=(c.g-c.b)/d+(c.g<c.b?6.0:0.0);else if(mx==c.g)h=(c.b-c.r)/d+2.0;else h=(c.r-c.g)/d+4.0;h/=6.0;}return vec3(h,s,l);}
+    cgain: CFS+`
+      void main(){fragColor=G(texture(u_src,v_uv));}`,
+    hue: CFS+HSL+`
       float hue2rgb(float p,float q,float t){if(t<0.0)t+=1.0;if(t>1.0)t-=1.0;if(t<1.0/6.0)return p+(q-p)*6.0*t;if(t<0.5)return q;if(t<2.0/3.0)return p+(q-p)*(2.0/3.0-t)*6.0;return p;}
       vec3 hsl2rgb(vec3 c){if(c.y==0.0)return vec3(c.z);float q=c.z<0.5?c.z*(1.0+c.y):c.z+c.y-c.z*c.y,p=2.0*c.z-q;return vec3(hue2rgb(p,q,c.x+1.0/3.0),hue2rgb(p,q,c.x),hue2rgb(p,q,c.x-1.0/3.0));}
-      void main(){vec4 s=texture(u_src,v_uv);vec3 hsl=rgb2hsl(s.rgb);hsl.x=mod(hsl.x+u_p,1.0);vec3 col=mix(s.rgb,hsl2rgb(hsl),u_t);fragColor=vec4(col,s.a);}`,
-    sat: FS_BASE+`
-      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));fragColor=vec4(mix(s.rgb,mix(vec3(lum),s.rgb,u_p),u_t),s.a);}`,
-    false_color: FS_BASE+`
-      uniform int u_pi;
-      vec3 fc(float t,int p){
-        vec3 pals[5*4];
-        pals[0]=vec3(0,0,0.5);pals[1]=vec3(0,0.5,1);pals[2]=vec3(0,1,0.5);pals[3]=vec3(1,1,0);pals[4]=vec3(1,0,0);
-        pals[5]=vec3(0,0,0);pals[6]=vec3(0.5,0,0.5);pals[7]=vec3(1,0,1);pals[8]=vec3(1,0.5,0);pals[9]=vec3(1,1,1);
-        pals[10]=vec3(0,0.25,0);pals[11]=vec3(0,0.63,0);pals[12]=vec3(0.5,1,0);pals[13]=vec3(1,1,0.5);pals[14]=vec3(1,1,1);
-        pals[15]=vec3(0.08,0.08,0.08);pals[16]=vec3(0.24,0,0.31);pals[17]=vec3(0.71,0,0.47);pals[18]=vec3(1,0.31,0);pals[19]=vec3(1,0.86,0.39);
-        float s2=t*3.0;int i=int(s2);float f=fract(s2);i=clamp(i,0,3);
-        vec3 a=pals[p*5+i],b2=pals[p*5+min(i+1,4)];return mix(a,b2,f);}
-      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));vec3 col=fc(lum,u_pi);fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
-    palette: FS_BASE+`
-      void main(){vec4 s=texture(u_src,v_uv);float steps=max(2.0,2.0+(1.0-u_p)*30.0);float q=255.0/(steps-1.0)/255.0;vec3 col=round(s.rgb/q)*q;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
-    channel: FS_BASE+`
-      void main(){vec4 s=texture(u_src,v_uv);int m=int(u_p*4.99);vec3 col;if(m==0)col=vec3(s.g,s.b,s.r);else if(m==1)col=vec3(s.b,s.r,s.g);else if(m==2)col=vec3(1.0-s.r,s.g,s.b);else if(m==3)col=vec3(s.r,1.0-s.g,s.b);else col=1.0-s.rgb;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
-    duo: FS_BASE+`
+      void main(){vec4 s=texture(u_src,v_uv);vec3 hsl=rgb2hsl(s.rgb);hsl.x=mod(hsl.x+u_p,1.0);vec3 col=mix(s.rgb,hsl2rgb(hsl),u_t);fragColor=G(vec4(col,s.a));}`,
+    sat: CFS+`
+      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));fragColor=G(vec4(mix(s.rgb,mix(vec3(lum),s.rgb,u_p),u_t),s.a));}`,
+    // palette comes in as a uniform (was a 20-entry local array built per pixel: ~2.5ms of gpu time)
+    false_color: CFS+`
+      uniform vec3 u_pal[5];
+      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));float s2=lum*3.0;int i=clamp(int(s2),0,3);vec3 col=mix(u_pal[i],u_pal[min(i+1,4)],fract(s2));fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    palette: CFS+`
+      void main(){vec4 s=texture(u_src,v_uv);float steps=max(2.0,2.0+(1.0-u_p)*30.0);float q=255.0/(steps-1.0)/255.0;vec3 col=round(s.rgb/q)*q;fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    channel: CFS+`
+      void main(){vec4 s=texture(u_src,v_uv);int m=int(u_p*4.99);vec3 col;if(m==0)col=vec3(s.g,s.b,s.r);else if(m==1)col=vec3(s.b,s.r,s.g);else if(m==2)col=vec3(1.0-s.r,s.g,s.b);else if(m==3)col=vec3(s.r,1.0-s.g,s.b);else col=1.0-s.rgb;fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    duo: CFS+`
       vec3 hsl2rgb2(float h,float s,float l){float q=l<0.5?l*(1.0+s):l+s-l*s,p2=2.0*l-q;float t3=h/360.0;vec3 c;float t1=t3+1.0/3.0,t2=t3,t4=t3-1.0/3.0;float arr[3];arr[0]=t1;arr[1]=t2;arr[2]=t4;for(int i=0;i<3;i++){float tv=arr[i];if(tv<0.0)tv+=1.0;if(tv>1.0)tv-=1.0;if(tv<1.0/6.0)arr[i]=p2+(q-p2)*6.0*tv;else if(tv<0.5)arr[i]=q;else if(tv<2.0/3.0)arr[i]=p2+(q-p2)*(2.0/3.0-tv)*6.0;else arr[i]=p2;}return vec3(arr[0],arr[1],arr[2]);}
-      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));vec3 tc=hsl2rgb2(u_p*360.0,1.0,0.5);vec3 col=lum*tc;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
-    lut: FS_BASE+`
-      void main(){vec4 s=texture(u_src,v_uv);int li=int(u_p*2.99);vec3 col;float l=dot(s.rgb,vec3(0.299,0.587,0.114));if(li==0)col=1.0-s.rgb;else if(li==1)col=vec3(min(1.0,l*1.2),min(1.0,l*0.9),min(1.0,l*0.6));else col=vec3(min(1.0,l*0.6),min(1.0,l*1.1),min(1.0,l*1.4));fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
+      void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));vec3 tc=hsl2rgb2(u_p*360.0,1.0,0.5);vec3 col=lum*tc;fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    lut: CFS+`
+      void main(){vec4 s=texture(u_src,v_uv);int li=int(u_p*2.99);vec3 col;float l=dot(s.rgb,vec3(0.299,0.587,0.114));if(li==0)col=1.0-s.rgb;else if(li==1)col=vec3(min(1.0,l*1.2),min(1.0,l*0.9),min(1.0,l*0.6));else col=vec3(min(1.0,l*0.6),min(1.0,l*1.1),min(1.0,l*1.4));fragColor=G(vec4(mix(s.rgb,col,u_t),s.a));}`,
+    // color trails: buf=max(buf*decay,src) in a persistent per-module texture (u_prev), then mix
+    cfb_buf: FS_BASE+`
+      uniform sampler2D u_prev;uniform float u_k;
+      void main(){vec4 s=texture(u_src,v_uv);vec3 b=u_k>0.5?s.rgb:max(texture(u_prev,v_uv).rgb*(0.5+u_p*0.49),s.rgb);fragColor=vec4(b,1.0);}`,
+    cfb_mix: CFS+`
+      uniform sampler2D u_b;
+      void main(){vec4 s=texture(u_b,v_uv);fragColor=G(vec4(mix(s.rgb,texture(u_src,v_uv).rgb,u_t),s.a));}`,
     // GEOMETRY
     geom_scale: FS_BASE+`
       void main(){float zoom=1.0+(u_p*3.0-1.0)*u_t;vec2 uv=(v_uv-0.5)/zoom+0.5;fragColor=texture(u_src,uv);}`,
@@ -2860,48 +2880,56 @@ const GLProcessor=(function(){
       void main(){vec4 s=texture(u_src,v_uv);float levels=max(2.0,2.0+u_p*14.0);vec3 col=floor(s.rgb*levels)/levels;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
     po_threshold: FS_BASE+`
       void main(){vec4 s=texture(u_src,v_uv);float lum=dot(s.rgb,vec3(0.299,0.587,0.114));float v=lum>u_p?1.0:0.0;fragColor=vec4(mix(s.rgb,vec3(v),u_t),s.a);}`,
-    po_bloom: FS_BASE+`
-      void main(){vec2 px=1.0/u_res;vec4 s=texture(u_src,v_uv);vec3 bloom=vec3(0);float r=max(1.0,u_p*8.0);float w=0.0;for(int x=-3;x<=3;x++)for(int y=-3;y<=3;y++){float d=float(x*x+y*y);float wt=exp(-d/(r*r));bloom+=texture(u_src,v_uv+vec2(float(x),float(y))*px).rgb*wt;w+=wt;}bloom/=w;fragColor=vec4(mix(s.rgb,bloom,u_t*0.7)+s.rgb*u_t*0.3,s.a);}`,
+    // bloom: the old 7×7 gaussian split into two 7-tap passes (same weights, it's separable); v pass mixes with the source (u_b)
+    po_bloom_h: FS_BASE+`
+      void main(){float px=1.0/u_res.x;float r=max(1.0,u_p*8.0);vec3 c=vec3(0);float w=0.0;for(int x=-3;x<=3;x++){float wt=exp(-float(x*x)/(r*r));c+=texture(u_src,v_uv+vec2(float(x)*px,0)).rgb*wt;w+=wt;}fragColor=vec4(c/w,1.0);}`,
+    po_bloom_v: FS_BASE+`
+      uniform sampler2D u_b;
+      void main(){float px=1.0/u_res.y;float r=max(1.0,u_p*8.0);vec3 c=vec3(0);float w=0.0;for(int y=-3;y<=3;y++){float wt=exp(-float(y*y)/(r*r));c+=texture(u_src,v_uv+vec2(0,float(y)*px)).rgb*wt;w+=wt;}vec3 bloom=c/w;vec4 s=texture(u_b,v_uv);fragColor=vec4(mix(s.rgb,bloom,u_t*0.7)+s.rgb*u_t*0.3,s.a);}`,
     po_aberration: FS_BASE+`
       void main(){float shift=u_p*u_t*0.02;float r=texture(u_src,v_uv+vec2(shift,0)).r;float g=texture(u_src,v_uv).g;float b=texture(u_src,v_uv-vec2(shift,0)).b;fragColor=vec4(r,g,b,1);}`,
+    // erode/dilate: square (2r+1)² min/max, r=max(1,round(p*4)), done as two separable passes (exact for min/max)
+    po_erode_h: FS_BASE+`
+      void main(){float px=1.0/u_res.x;int r=max(1,int(floor(u_p*4.0+0.5)));vec3 m=vec3(1);for(int i=-4;i<=4;i++){if(i<-r||i>r)continue;m=min(m,texture(u_src,v_uv+vec2(float(i)*px,0)).rgb);}fragColor=vec4(m,1.0);}`,
+    po_erode_v: FS_BASE+`
+      uniform sampler2D u_b;
+      void main(){float px=1.0/u_res.y;int r=max(1,int(floor(u_p*4.0+0.5)));vec3 m=vec3(1);for(int i=-4;i<=4;i++){if(i<-r||i>r)continue;m=min(m,texture(u_src,v_uv+vec2(0,float(i)*px)).rgb);}fragColor=vec4(mix(texture(u_b,v_uv).rgb,m,u_t),1.0);}`,
+    po_dilate_h: FS_BASE+`
+      void main(){float px=1.0/u_res.x;int r=max(1,int(floor(u_p*4.0+0.5)));vec3 m=vec3(0);for(int i=-4;i<=4;i++){if(i<-r||i>r)continue;m=max(m,texture(u_src,v_uv+vec2(float(i)*px,0)).rgb);}fragColor=vec4(m,1.0);}`,
+    po_dilate_v: FS_BASE+`
+      uniform sampler2D u_b;
+      void main(){float px=1.0/u_res.y;int r=max(1,int(floor(u_p*4.0+0.5)));vec3 m=vec3(0);for(int i=-4;i<=4;i++){if(i<-r||i>r)continue;m=max(m,texture(u_src,v_uv+vec2(0,float(i)*px)).rgb);}fragColor=vec4(mix(texture(u_b,v_uv).rgb,m,u_t),1.0);}`,
     // SIGNALNOISE
-    sn_rgb: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_rgb: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);float a=u_p*u_t*0.3;vec3 n=vec3(rand(v_uv+u_time),rand(v_uv+u_time+0.1),rand(v_uv+u_time+0.2))-0.5;fragColor=vec4(clamp(s.rgb+n*a,0.0,1.0),s.a);}`,
-    sn_luma: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_luma: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);float n=(rand(v_uv+u_time)-0.5)*u_p*u_t*0.3;fragColor=vec4(clamp(s.rgb+n,0.0,1.0),s.a);}`,
-    sn_chroma: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_chroma: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);float a=u_p*u_t*0.3;float nr=(rand(v_uv+u_time)-0.5)*a;float nb=(rand(v_uv+u_time+0.3)-0.5)*a;fragColor=vec4(clamp(s.r+nr,0.0,1.0),s.g,clamp(s.b+nb,0.0,1.0),s.a);}`,
     sn_quantize: FS_BASE+`
       void main(){vec4 s=texture(u_src,v_uv);float steps=max(2.0,floor((1.0-u_p)*32.0*u_t)+2.0);float step=1.0/steps;vec3 col=floor(s.rgb/step)*step;fragColor=vec4(col,s.a);}`,
-    sn_saltpepper: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_saltpepper: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);float r=rand(v_uv+u_time);if(r<u_p*u_t*0.04){float v=rand(v_uv+u_time+1.0)<0.5?0.0:1.0;fragColor=vec4(v,v,v,1);}else fragColor=s;}`,
-    sn_bitflip: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    sn_bitflip: FS_BASE+RAND+`
       void main(){vec4 s=texture(u_src,v_uv);if(rand(v_uv+u_time)<u_p*u_t*0.02){int ch=int(rand(v_uv+u_time+2.0)*3.0);int bit=int(pow(2.0,floor(rand(v_uv+u_time+3.0)*8.0)));if(ch==0)s.r=float(int(s.r*255.0)^bit)/255.0;else if(ch==1)s.g=float(int(s.g*255.0)^bit)/255.0;else s.b=float(int(s.b*255.0)^bit)/255.0;}fragColor=s;}`,
     // ROWSHIFT (full GPU horizontal shift effects)
     rs_interlace: FS_BASE+`
       void main(){float shift=u_p*30.0*u_t/u_res.x;vec2 uv=v_uv;uv.x+=mod(floor(uv.y*u_res.y),2.0)==0.0?shift:-shift;fragColor=texture(u_src,uv);}`,
-    rs_drift: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    rs_drift: FS_BASE+RAND+`
       void main(){float maxS=u_p*40.0*u_t/u_res.x;float row=floor(v_uv.y*u_res.y);float shift=(rand(vec2(row,0.5))-0.5)*2.0*maxS;fragColor=texture(u_src,vec2(fract(v_uv.x+shift),v_uv.y));}`,
-    rs_jitter: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    rs_jitter: FS_BASE+RAND+`
       void main(){float row=floor(v_uv.y*u_res.y);float maxJ=u_p*15.0*u_t/u_res.x;float shift=rand(vec2(row,u_time))<0.4*u_t?(rand(vec2(row,u_time+1.0))-0.5)*2.0*maxJ:0.0;fragColor=texture(u_src,vec2(fract(v_uv.x+shift),v_uv.y));}`,
     rs_wave: FS_BASE+`
       void main(){float wave=sin(v_uv.y*6.2832*4.0+u_time*2.0)*u_p*20.0*u_t/u_res.x;float row=floor(v_uv.y*u_res.y);float drift=(fract(sin(dot(vec2(row,0.5),vec2(12.98,78.23)))*43758.5)-0.5)*2.0*u_p*30.0*u_t/u_res.x;fragColor=texture(u_src,vec2(fract(v_uv.x+wave+drift),v_uv.y));}`,
-    // DATAMOSH GPU-friendly
+    // DATAMOSH GPU-friendly (warp: u_time is seconds; the cpu path uses ms*0.002 → 2 rad/s)
     dm_warp: FS_BASE+`
-      void main(){float freq=1.0+u_p*8.0;float amp=u_t*20.0/u_res.x;float off=sin(v_uv.y*freq*6.2832+u_time*0.002)*amp;fragColor=texture(u_src,vec2(clamp(v_uv.x+off,0.0,1.0),v_uv.y));}`,
+      void main(){float freq=1.0+u_p*8.0;float amp=u_t*20.0/u_res.x;float off=sin(v_uv.y*freq*6.2832+u_time*2.0)*amp;fragColor=texture(u_src,vec2(clamp(v_uv.x+off,0.0,1.0),v_uv.y));}`,
     dm_bitcrush: FS_BASE+`
       void main(){vec4 s=texture(u_src,v_uv);float levels=max(2.0,2.0+(1.0-u_p)*62.0);float q=1.0/(levels-1.0);vec3 col=round(s.rgb/q)*q;fragColor=vec4(mix(s.rgb,col,u_t),s.a);}`,
     dm_disp_gl: FS_BASE+`
       uniform sampler2D u_prev;
       void main(){float scale=u_p*30.0*u_t;vec2 d=texture(u_prev,v_uv).rg*2.0-1.0;float lum=dot(texture(u_prev,v_uv).rgb,vec3(0.299,0.587,0.114));float angle=lum*6.2832;vec2 uv=v_uv+vec2(cos(angle),sin(angle))*scale/u_res;fragColor=texture(u_src,clamp(uv,0.0,1.0));}`,
-    // KEYER
+    // KEYER — u_src = upstream chain (background), u_b = raw B (key source); B shows where the key is not met
     keyer_luma_dark: FS_BASE+`
       uniform sampler2D u_b;
       void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float lum=dot(b.rgb,vec3(0.299,0.587,0.114));float alpha=lum<u_p?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
@@ -2910,16 +2938,24 @@ const GLProcessor=(function(){
       void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float lum=dot(b.rgb,vec3(0.299,0.587,0.114));float alpha=lum>u_p?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
     keyer_chroma_green: FS_BASE+`
       uniform sampler2D u_b;
-      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float g=b.g-(b.r+b.b)/2.0;float alpha=g>u_p*0.31?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float g=b.g-(b.r+b.b)/2.0;float alpha=g>u_p*80.0/255.0?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
     keyer_chroma_blue: FS_BASE+`
       uniform sampler2D u_b;
-      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float bl=b.b-(b.r+b.g)/2.0;float alpha=bl>u_p*0.31?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float bl=b.b-(b.r+b.g)/2.0;float alpha=bl>u_p*80.0/255.0?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
     keyer_luma_invert: FS_BASE+`
       uniform sampler2D u_b;
       void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float lum=dot(b.rgb,vec3(0.299,0.587,0.114));float alpha=lum>u_p?1.0:0.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+    keyer_chroma_custom: FS_BASE+HSL+`
+      uniform sampler2D u_b;
+      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float d=abs(rgb2hsl(b.rgb).x*360.0-u_p*360.0);d=min(d,360.0-d);float alpha=d<40.0?0.0:1.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+    keyer_isolate: FS_BASE+HSL+`
+      uniform sampler2D u_b;
+      void main(){vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float d=abs(rgb2hsl(b.rgb).x*360.0-u_p*360.0);d=min(d,360.0-d);float alpha=d<40.0?1.0:0.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
+    keyer_contrast: FS_BASE+`
+      uniform sampler2D u_b;
+      void main(){const vec3 Y=vec3(0.299,0.587,0.114);vec4 a=texture(u_src,v_uv);vec4 b=texture(u_b,v_uv);float l=dot(b.rgb,Y);float ln=gl_FragCoord.x<u_res.x-1.0?dot(texture(u_b,v_uv+vec2(1.0/u_res.x,0)).rgb,Y):l;float alpha=abs(l-ln)>u_p?1.0:0.0;fragColor=mix(a,vec4(b.rgb,1.0),alpha*u_t);}`,
     // VHS GPU shaders
-    vhs_tracking: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    vhs_tracking: FS_BASE+RAND+`
       void main(){vec2 uv=v_uv;float n=rand(vec2(uv.y*100.0,u_time));float shift=(n-0.5)*u_t*u_p*0.05;uv.x+=shift;vec4 s=texture(u_src,uv);float noise=(rand(uv+u_time)-0.5)*0.1*u_t;fragColor=vec4(clamp(s.rgb+noise,0.0,1.0),s.a);}`,
     vhs_colorbleed: FS_BASE+`
       void main(){float sh=u_p*u_t*0.015;vec4 s=texture(u_src,v_uv);float r=texture(u_src,v_uv+vec2(sh,0)).r;float b=texture(u_src,v_uv-vec2(sh,0)).b;fragColor=vec4(r,s.g,b,s.a);}`,
@@ -2927,25 +2963,33 @@ const GLProcessor=(function(){
       void main(){vec4 s=texture(u_src,v_uv);float w=sin(v_uv.y*50.0+u_time*3.0)*0.015*u_t*u_p;float lum=dot(s.rgb,vec3(0.299,0.587,0.114));fragColor=vec4(clamp(s.rgb+w,0.0,1.0),s.a);}`,
     vhs_chromashift: FS_BASE+`
       void main(){float sh=u_p*u_t*0.02;float r=texture(u_src,v_uv+vec2(sh,sh*0.5)).r;float g=texture(u_src,v_uv).g;float b=texture(u_src,v_uv-vec2(sh,sh*0.5)).b;fragColor=vec4(r,g,b,1);}`,
-    vhs_headswitch: FS_BASE+`
-      float rand(vec2 co){return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);}
+    vhs_headswitch: FS_BASE+RAND+`
       void main(){vec2 uv=v_uv;float row=floor(uv.y*u_res.y);if(row<u_res.y*0.05&&rand(vec2(u_time,row))<u_t*u_p){uv.x=fract(uv.x+(rand(vec2(row,u_time))-0.5)*0.3);}fragColor=texture(u_src,uv);}`,
   };
 
-  function initGL(){
-    glCanvas=document.createElement('canvas');
-    glCanvas.width=W;glCanvas.height=H;
-    gl=glCanvas.getContext('webgl2',{preserveDrawingBuffer:true,antialias:false,alpha:false});
-    if(!gl){console.warn('WebGL2 not available, using CPU fallback');return false;}
-    // fullscreen quad
-    const buf=gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER,buf);
-    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
-    // allocate FBO textures for ping-pong
-    fboTex=_mkTex();fboTex2=_mkTex();
-    fbo=gl.createFramebuffer();
-    return true;
-  }
+  // false-color palettes (the gl table; indexed by floor(param*3.99))
+  const FC_PAL=[
+    [0,0,0.5, 0,0.5,1, 0,1,0.5, 1,1,0, 1,0,0],
+    [0,0,0, 0.5,0,0.5, 1,0,1, 1,0.5,0, 1,1,1],
+    [0,0.25,0, 0,0.63,0, 0.5,1,0, 1,1,0.5, 1,1,1],
+    [0.08,0.08,0.08, 0.24,0,0.31, 0.71,0,0.47, 1,0.31,0, 1,0.86,0.39]
+  ].map(a=>new Float32Array(a));
+
+  // multi-pass / stateful effects: (srcTex, extraTex, mod) → output texture (or false)
+  const PIPES={
+    po_bloom:(s)=>{const a=_pass('po_bloom_h',s,null,_pick(s));return a&&_pass('po_bloom_v',a,s,_pick(s,a));},
+    po_erode:(s)=>{const a=_pass('po_erode_h',s,null,_pick(s));return a&&_pass('po_erode_v',a,s,_pick(s,a));},
+    po_dilate:(s)=>{const a=_pass('po_dilate_h',s,null,_pick(s));return a&&_pass('po_dilate_v',a,s,_pick(s,a));},
+    cfb:(s,ex,mod)=>{
+      let st=_modGL.get(mod);
+      if(!st||st.gen!==_gen||st.w!==W||st.h!==H){st={a:_mkTex(),b:_mkTex(),w:W,h:H,gen:_gen,init:true};_modGL.set(mod,st);}
+      U.k=st.init?1:0;
+      const b=_pass('cfb_buf',s,st.a,st.b);
+      if(!b) return false;
+      st.init=false;const tmp=st.a;st.a=st.b;st.b=tmp;   // st.a = current trail buffer
+      return _pass('cfb_mix',st.a,s,_pick(s,st.a));
+    },
+  };
 
   function _mkTex(){
     const t=gl.createTexture();
@@ -2957,97 +3001,98 @@ const GLProcessor=(function(){
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
     return t;
   }
+  // a W×H pool texture that is none of the given (still needed) textures
+  function _pick(a,b){
+    for(const t of pool) if(t!==a&&t!==b) return t;
+    const t=_mkTex();pool.push(t);return t;
+  }
 
-  function _compile(name,fsSrc){
-    if(programs[name]) return programs[name];
-    const vs=gl.createShader(gl.VERTEX_SHADER);gl.shaderSource(vs,VS);gl.compileShader(vs);
-    const fs=gl.createShader(gl.FRAGMENT_SHADER);gl.shaderSource(fs,fsSrc);gl.compileShader(fs);
-    if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS)){
-      console.warn('GL shader error ['+name+']:',gl.getShaderInfoLog(fs));
-      return null;
-    }
-    const prog=gl.createProgram();gl.attachShader(prog,vs);gl.attachShader(prog,fs);gl.linkProgram(prog);
-    if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){console.warn('GL link error:',gl.getProgramInfoLog(prog));return null;}
-    const buf2=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf2);
+  function _setup(){
+    programs={};pool=[];_lastOut=_lastTex=null;_gen++;
+    vsObj=gl.createShader(gl.VERTEX_SHADER);gl.shaderSource(vsObj,VS);gl.compileShader(vsObj);
+    if(!gl.getShaderParameter(vsObj,gl.COMPILE_STATUS)){console.warn('GL vertex shader error:',gl.getShaderInfoLog(vsObj));return false;}
+    // fullscreen quad on attrib 0 (bound at link time), set once
+    const buf=gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER,buf);
     gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
-    const loc=gl.getAttribLocation(prog,'a_pos');
-    gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
-    programs[name]={prog,buf:buf2,loc};
-    return programs[name];
-  }
-
-  function _uploadTex(canvas){
-    if(!textures.src) textures.src=_mkTex();
-    gl.bindTexture(gl.TEXTURE_2D,textures.src);
+    gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+    fbo=gl.createFramebuffer();
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,canvas);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
-    return textures.src;
-  }
-
-  function _uploadPrev(canvas){
-    if(!textures.prev) textures.prev=_mkTex();
-    gl.bindTexture(gl.TEXTURE_2D,textures.prev);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,canvas);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
-    return textures.prev;
-  }
-
-  function _run(shaderName,srcTex,uniforms,extraTex){
-    const p=_compile(shaderName,SHADERS[shaderName]);
-    if(!p) return false;
-    // bind output FBO
-    const outTex=currentFbo===0?fboTex:fboTex2;
-    gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,outTex,0);
-    gl.viewport(0,0,W,H);
-    gl.useProgram(p.prog);
-    gl.bindBuffer(gl.ARRAY_BUFFER,p.buf);
-    gl.enableVertexAttribArray(p.loc);gl.vertexAttribPointer(p.loc,2,gl.FLOAT,false,0,0);
-    // src texture unit 0
-    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,srcTex);
-    gl.uniform1i(gl.getUniformLocation(p.prog,'u_src'),0);
-    // uniforms
-    const set=(n,v)=>{const l=gl.getUniformLocation(p.prog,n);if(l!=null)gl.uniform1f(l,v);};
-    const seti=(n,v)=>{const l=gl.getUniformLocation(p.prog,n);if(l!=null)gl.uniform1i(l,v);};
-    set('u_t',uniforms.t||0);set('u_p',uniforms.p||0);
-    set('u_time',performance.now()*0.001);
-    const rl=gl.getUniformLocation(p.prog,'u_res');if(rl)gl.uniform2f(rl,W,H);
-    if(uniforms.pi!==undefined) seti('u_pi',uniforms.pi);
-    if(extraTex){
-      gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,extraTex);
-      gl.uniform1i(gl.getUniformLocation(p.prog,'u_b'),1);
-      gl.uniform1i(gl.getUniformLocation(p.prog,'u_prev'),1);
-    }
-    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
-    currentFbo=1-currentFbo;
-    return outTex;
-  }
-
-  // read result back to a 2D canvas for the rest of the pipeline.
-  // Readback scratch buffers are allocated once and reused every frame —
-  // allocating W*H*4 bytes twice per GL module per frame caused ~470MB/s of
-  // GC pressure at 854×480. Invalidated on resize.
-  let _readBuf=null,_readId=null,_readW=0,_readH=0;
-  function _readToCanvas(tex,dstCtx){
-    if(!tex) return false;
-    gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
-    if(!_readBuf||_readW!==W||_readH!==H){
-      _readBuf=new Uint8Array(W*H*4);
-      _readId=dstCtx.createImageData(W,H);
-      _readW=W;_readH=H;
-    }
-    gl.readPixels(0,0,W,H,gl.RGBA,gl.UNSIGNED_BYTE,_readBuf);
-    // WebGL readPixels is bottom-up; flip rows to match canvas top-down convention
-    const rowBytes=W*4;
-    for(let y=0;y<H;y++) _readId.data.set(_readBuf.subarray((H-1-y)*rowBytes,(H-y)*rowBytes),y*rowBytes);
-    dstCtx.putImageData(_readId,0,0);
+    texSrc={t:gl.createTexture(),w:0,h:0};texB={t:gl.createTexture(),w:0,h:0};
+    [texSrc.t,texB.t].forEach(t=>{gl.bindTexture(gl.TEXTURE_2D,t);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);});
     return true;
   }
 
-  // ensure offscreen canvas exists for a module
+  function initGL(){
+    glCanvas=document.createElement('canvas');
+    glCanvas.width=W;glCanvas.height=H;
+    // alpha kept (un-premultiplied) so transparent sources survive a gl module like the old readback did
+    gl=glCanvas.getContext('webgl2',{preserveDrawingBuffer:false,antialias:false,alpha:true,premultipliedAlpha:false,depth:false,stencil:false});
+    if(!gl){console.warn('WebGL2 not available, using CPU fallback');return false;}
+    glCanvas.addEventListener('webglcontextlost',e=>{e.preventDefault();_ready=false;programs={};pool=[];texSrc=texB=null;fbo=null;vsObj=null;_lastOut=_lastTex=null;_gen++;console.warn('GL context lost — cpu fallback until restored');});
+    glCanvas.addEventListener('webglcontextrestored',()=>{glCanvas.width=W;glCanvas.height=H;_ready=_setup();});
+    return _setup();
+  }
+
+  // compile once; failures cached as false (no per-frame retry / warn spam)
+  function _prog(name){
+    const c=programs[name];
+    if(c!==undefined) return c;
+    const src=SHADERS[name];
+    if(!src) return programs[name]=false;
+    const fs=gl.createShader(gl.FRAGMENT_SHADER);gl.shaderSource(fs,src);gl.compileShader(fs);
+    if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS)){
+      if(gl.isContextLost()) return false;
+      console.warn('GL shader error ['+name+']:',gl.getShaderInfoLog(fs));gl.deleteShader(fs);
+      return programs[name]=false;
+    }
+    const prog=gl.createProgram();gl.attachShader(prog,vsObj);gl.attachShader(prog,fs);
+    gl.bindAttribLocation(prog,0,'a_pos');gl.linkProgram(prog);gl.deleteShader(fs);
+    if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){
+      if(gl.isContextLost()) return false;
+      console.warn('GL link error ['+name+']:',gl.getProgramInfoLog(prog));gl.deleteProgram(prog);
+      return programs[name]=false;
+    }
+    const L={};UNIFORMS.forEach(n=>{L[n]=gl.getUniformLocation(prog,n);});
+    gl.useProgram(prog);
+    if(L.u_src)gl.uniform1i(L.u_src,0);if(L.u_b)gl.uniform1i(L.u_b,1);if(L.u_prev)gl.uniform1i(L.u_prev,1);
+    return programs[name]={prog,L};
+  }
+
+  function _upload(rec,canvas){
+    gl.bindTexture(gl.TEXTURE_2D,rec.t);
+    const w=canvas.width||canvas.videoWidth||0,h=canvas.height||canvas.videoHeight||0;
+    if(rec.w!==w||rec.h!==h){gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,gl.RGBA,gl.UNSIGNED_BYTE,canvas);rec.w=w;rec.h=h;}
+    else gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,canvas);
+    return rec.t;
+  }
+
+  // one fullscreen pass: src on unit 0, ex (u_b/u_prev) on unit 1, into out (null = default framebuffer)
+  function _pass(name,src,ex,out){
+    const p=_prog(name);
+    if(!p) return false;
+    gl.bindFramebuffer(gl.FRAMEBUFFER,out?fbo:null);
+    if(out) gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,out,0);
+    gl.viewport(0,0,W,H);
+    gl.useProgram(p.prog);
+    gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,ex||null);
+    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,src);
+    const L=p.L;
+    if(L.u_t)gl.uniform1f(L.u_t,U.t);
+    if(L.u_p)gl.uniform1f(L.u_p,U.p);
+    if(L.u_time)gl.uniform1f(L.u_time,U.time);
+    if(L.u_res)gl.uniform2f(L.u_res,W,H);
+    if(L.u_pi)gl.uniform1i(L.u_pi,U.pi);
+    if(L.u_k)gl.uniform1f(L.u_k,U.k);
+    if(L.u_pal)gl.uniform3fv(L.u_pal,U.pal||FC_PAL[0]);
+    if(L.u_gain){const g=U.cg;gl.uniform3f(L.u_gain,g?(g.r??1):1,g?(g.g??1):1,g?(g.b??1):1);}
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    return out||true;
+  }
+
+  // ensure offscreen canvas exists for a module (processors' cpu paths expect it)
   function _ensureOff(mod){
     if(!mod.offscreen){
       mod.offscreen=document.createElement('canvas');
@@ -3056,37 +3101,50 @@ const GLProcessor=(function(){
     }
   }
 
-  let _ready=false;
-
   return {
     init(){_ready=initGL();return _ready;},
     ready(){return _ready;},
+    // start of a render frame: forget the chaining candidate
+    frame(){_lastOut=_lastTex=null;},
     resize(w,h){
       if(!_ready) return;
       glCanvas.width=w;glCanvas.height=h;
-      if(fboTex) gl.deleteTexture(fboTex);
-      if(fboTex2) gl.deleteTexture(fboTex2);
-      fboTex=_mkTex();fboTex2=_mkTex();
-      if(textures.src){gl.deleteTexture(textures.src);textures.src=null;}
-      if(textures.prev){gl.deleteTexture(textures.prev);textures.prev=null;}
+      pool.forEach(t=>gl.deleteTexture(t));pool=[];
+      texSrc.w=texSrc.h=texB.w=texB.h=0;
+      _lastOut=_lastTex=null;
     },
 
-    // Main entry: run a GL shader on srcCanvas, write result to mod.offscreen
-    // Returns mod.offscreen on success, null on failure
+    // Main entry: run a GL effect on srcCanvas (extraCanvas → u_b/u_prev on unit 1).
+    // Returns a canvas (the module's gpu-backed mod._glOut) the caller can drawImage/getImageData
+    // from, or null on failure (caller falls back to cpu). Don't draw into the returned canvas.
     run(shaderName,mod,srcCanvas,extraCanvas){
-      if(!_ready) return null;
+      if(!_ready||!srcCanvas||(!SHADERS[shaderName]&&!PIPES[shaderName])) return null;
       _ensureOff(mod);
       try{
-        const srcTex=_uploadTex(srcCanvas);
-        let extraTex=null;
-        if(extraCanvas) extraTex=_uploadPrev(extraCanvas);
-        const outTex=_run(shaderName,srcTex,{t:mod.intensity,p:mod.param,pi:(shaderName==='false_color'?Math.floor(mod.param*3.99):mod.activeFx||0)},extraTex);
-        if(!outTex) return null;
-        // reliable readback path (avoids blitFramebuffer sync issues)
-        _readToCanvas(outTex,mod.offCtx);
-        return mod.offscreen;
+        const src=(srcCanvas===_lastOut&&_lastTex)?_lastTex:_upload(texSrc,srcCanvas);
+        const ex=extraCanvas?((extraCanvas===_lastOut&&_lastTex)?_lastTex:_upload(texB,extraCanvas)):null;
+        U.t=mod.intensity||0;U.p=mod.param||0;U.k=0;
+        U.pi=shaderName==='false_color'?Math.floor(U.p*3.99):mod.activeFx||0;
+        U.pal=shaderName==='false_color'?FC_PAL[Math.min(3,Math.max(0,U.pi))]:null;
+        U.cg=mod.channelGain||null;
+        U.time=(performance.now()*0.001)%3600;   // wrapped: noise shaders lose precision on big floats
+        const pipe=PIPES[shaderName];
+        const out=pipe?pipe(src,ex,mod):_pass(shaderName,src,ex,_pick(src,ex));
+        if(!out) return null;
+        _pass('_copy',out,null,null);
+        let oc=mod._glOut;
+        if(!oc){oc=mod._glOut=document.createElement('canvas');oc.width=W;oc.height=H;mod._glOutCtx=oc.getContext('2d');}
+        else if(oc.width!==W||oc.height!==H){oc.width=W;oc.height=H;}
+        const octx=mod._glOutCtx;
+        octx.globalCompositeOperation='copy';
+        octx.drawImage(glCanvas,0,0);
+        _lastOut=oc;_lastTex=out;
+        return oc;
       }catch(e){
-        console.warn('GL run error:',e);
+        _lastOut=_lastTex=null;
+        // tainted (cross-origin) input: texImage2D throws SecurityError; the cpu fallback will
+        // throw it again from getImageData and renderFrame resets the mix canvas
+        if(e&&e.name!=='SecurityError'&&!mod._glWarned){mod._glWarned=true;console.warn('GL run error:',e);}
         return null;
       }
     }
