@@ -1317,6 +1317,18 @@ body.dark .bypass-btn.off rect{fill:var(--paper);}
 #tut-card{position:fixed;top:0;left:50%;transform:translateX(-50%);width:340px;background:var(--paper);border:2px solid var(--ink);z-index:9000;display:none;box-shadow:4px 4px 0 var(--ink);zoom:1.5;}
 /* spotlight: dims everything except the step's focus rects. sits under the card
    and every popup/dropdown (99000+), never takes clicks */
+/* live illustrations: real UI cloned into the card, driven by a fake cursor */
+#tut-card .tc-illus.tut-live-host{display:block;}
+.tut-live{position:relative;overflow:hidden;padding:14px 12px;border:2px solid var(--ink);color:var(--ink);background:var(--paper);}
+.tut-live-inner{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:flex-start;pointer-events:none;}
+.tut-live-inner *{pointer-events:none!important;transition:none!important;}
+.tut-live-ph{background:var(--paper);background-image:var(--dither-25);background-repeat:repeat;border:0;}
+.tut-live-crt::after{content:'';position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(0,0,0,.28) 0 1px,transparent 1px 3px);}
+.tut-live .tut-pressed{transform:translate(1px,1px);}
+.tut-cursor{position:absolute;left:0;top:0;width:13px;height:19px;z-index:3;pointer-events:none;transition:transform .55s cubic-bezier(.3,.7,.3,1);will-change:transform;}
+.tut-cursor.tut-down svg{transform:scale(.85);transform-origin:0 0;}
+.tut-cursor.tut-drag{transition:transform .9s linear;}
+@media (prefers-reduced-motion:reduce){.tut-cursor{display:none;}}
 #tut-dim{position:fixed;inset:0;z-index:8950;pointer-events:none;display:none;}
 #tut-dim svg{display:block;width:100%;height:100%;}
 #tut-dim path{fill:rgba(0,0,0,0.62);fill-rule:evenodd;}
@@ -11270,6 +11282,7 @@ function _tutStop(){
   _ta=false;
   document.getElementById('tut-card').style.display='none';
   _tutWatch(false);
+  _tutLiveRun++;
   const sm=document.getElementById('skip-modal');if(sm)sm.style.display='none';
   clearInterval(_tp);_tp=null;
   clearInterval(_tutFpsIv);_tutFpsIv=null;
@@ -11459,7 +11472,8 @@ function _showTS(i){
 
   // illustration — force animation restart
   const illusEl=document.getElementById('tc-illus');
-  if(illusEl){
+  if(illusEl&&_tutLiveShow(s,illusEl)){}
+  else if(illusEl){
     if(s.illus){
       illusEl.innerHTML=s.illus;
       illusEl.style.display='flex';
@@ -11561,6 +11575,176 @@ function _showTS(i){
     if(skipBtn){skipBtn.textContent='skip tutorial';skipBtn.style.display='block';skipBtn.style.marginLeft='auto';}
   }
   _tutFocusStep(s);
+}
+
+/* ── LIVE ILLUSTRATIONS ──
+   For "find this and click it" steps the card shows a copy of the real UI
+   instead of a drawing, so it's always the exact icons, fonts and states.
+   build(stage) clones what the step needs; run(api) is a looping script of
+   cursor moves, clicks and drags that only touch the copies. Falls back to
+   the step's drawn illus when the real element isn't on screen yet. */
+const TUT_TOKENS=['--ink','--paper','--dim','--dither-50','--dither-25','--stripes-h','--dither-checker','--shadow-press','--shadow-hard','--shadow-hard-md','--shadow-hard-lg','--knockout-sm','--knockout-md','--knockout-lg','--knockout-body'];
+const TUT_CURSOR_SVG='<svg width="13" height="19" viewBox="0 0 13 19" shape-rendering="crispEdges"><path d="M1 1v15l4-4 3 6 2-1-3-6h5z" fill="#000" stroke="#fff" stroke-width="1.5" paint-order="stroke"/></svg>';
+let _tutLiveRun=0;
+// token set of the live app, or of the other theme (an .inverse probe flips it)
+function _tutTokensFrom(el){const cs=getComputedStyle(el);const o={};TUT_TOKENS.forEach(t=>{const v=cs.getPropertyValue(t);if(v)o[t]=v.trim();});return o;}
+function _tutThemeTokens(other){
+  if(!other) return _tutTokensFrom(document.body);
+  const probe=document.createElement('div');probe.className='inverse';probe.style.display='none';
+  document.body.appendChild(probe);const t=_tutTokensFrom(probe);probe.remove();return t;
+}
+function _tutApplyTokens(el,t){Object.entries(t).forEach(([k,v])=>el.style.setProperty(k,v));}
+// inert copy: ids moved to data-cid, canvases swapped for dither placeholders
+function _tutClone(src){
+  const c=src.cloneNode(true);
+  const fix=el=>{if(el.id){el.dataset.cid=el.id;el.removeAttribute('id');}el.removeAttribute('onclick');el.removeAttribute('tabindex');};
+  fix(c);c.querySelectorAll('*').forEach(fix);
+  const cvs=[c,...c.querySelectorAll('canvas')].filter(e=>e.tagName==='CANVAS');
+  const real=[src,...src.querySelectorAll('canvas')].filter(e=>e.tagName==='CANVAS');
+  let root=c;
+  cvs.forEach((cv,i)=>{const r=real[i]&&real[i].getBoundingClientRect();const ph=document.createElement('div');ph.className='tut-live-ph '+(cv.className||'');ph.dataset.cid=cv.dataset.cid||'';ph.style.width='100%';ph.style.aspectRatio=r&&r.height?`${r.width}/${r.height}`:'16/9';if(cv===c)root=ph;else cv.replaceWith(ph);});
+  root.setAttribute('aria-hidden','true');root.inert=true;
+  return root;
+}
+const _tutQ=(stage,cid)=>stage.querySelector(`[data-cid="${cid}"]`);
+const _tutSleep=(ms,run)=>new Promise((res,rej)=>setTimeout(()=>run===_tutLiveRun?res():rej('stale'),ms));
+function _tutLiveApi(stage,run){
+  const cur=document.createElement('div');cur.className='tut-cursor';cur.innerHTML=TUT_CURSOR_SVG;stage.appendChild(cur);
+  // stage-local coords of a point inside el (fractions of its box); the card's
+  // zoom scales rects, so divide it back out
+  const at=(el,fx=0.5,fy=0.5)=>{const z=(stage.getBoundingClientRect().width/stage.offsetWidth)||1;const s=stage.getBoundingClientRect(),r=el.getBoundingClientRect();return [(r.left-s.left+r.width*fx)/z,(r.top-s.top+r.height*fy)/z];};
+  const place=(x,y)=>{cur.style.transform=`translate(${x}px,${y}px)`;};
+  const w=stage.offsetWidth,h=stage.offsetHeight;
+  place(w*0.82,h*0.9);
+  return {
+    stage,
+    wait:ms=>_tutSleep(ms,run),
+    async move(el,fx,fy){const [x,y]=at(el,fx,fy);place(x,y);await _tutSleep(650,run);},
+    async click(el,fn){cur.classList.add('tut-down');el.classList.add('tut-pressed');await _tutSleep(130,run);fn&&fn();cur.classList.remove('tut-down');el.classList.remove('tut-pressed');await _tutSleep(250,run);},
+    async drag(track,thumb,from,to,onVal){
+      const [x0,y0]=at(track,from,0.5);place(x0,y0);await _tutSleep(650,run);
+      cur.classList.add('tut-down');await _tutSleep(150,run);
+      cur.classList.add('tut-drag');const [x1,y1]=at(track,to,0.5);place(x1,y1);
+      const t0=performance.now();
+      await new Promise((res,rej)=>{const tick=()=>{if(run!==_tutLiveRun)return rej('stale');const k=Math.min(1,(performance.now()-t0)/900);const v=from+(to-from)*k;thumb.style.left=(v*100)+'%';onVal&&onVal(v);k<1?setTimeout(tick,16):res();};tick();});
+      cur.classList.remove('tut-drag','tut-down');await _tutSleep(300,run);
+    },
+    rest(){place(w*0.82,h*0.9);return _tutSleep(700,run);},
+  };
+}
+// flip a cloned topbar switch (theme/crt) the way _updateThemeSwitch/_updateCRTSwitch do
+function _tutFlipSwitch(btn,on,label){
+  btn.classList.toggle('on',on);
+  const knob=btn.querySelector('svg rect:nth-of-type(2)');if(knob)knob.setAttribute('x',on?'12':'2');
+  if(label){const tn=[...btn.childNodes].filter(n=>n.nodeType===3).pop();if(tn)tn.textContent=tn.textContent.replace(/dark|light/,label);}
+}
+const _tutFirstFx=()=>[...document.querySelectorAll('#mod-slots .node[data-mod-id]')].find(n=>{const m=state.modules.find(x=>x.id===n.dataset.modId);return m&&m.type!=='modulator';});
+const TUT_LIVE={
+  'two-switches-in':{
+    build(stage){
+      const th=document.getElementById('btn-theme'),crt=document.getElementById('btn-crt');
+      if(!th||!crt) return false;
+      // sit them on the real topbar's background
+      const tb=getComputedStyle(document.querySelector('.topbar'));
+      stage.style.backgroundColor=tb.backgroundColor;stage.style.backgroundImage=tb.backgroundImage;
+      stage.querySelector('.tut-live-inner').append(_tutClone(th),_tutClone(crt));
+      return true;
+    },
+    async run(a){
+      const th=_tutQ(a.stage,'btn-theme'),crt=_tutQ(a.stage,'btn-crt');
+      const dark=document.body.classList.contains('dark'),crtOn=document.body.classList.contains('crt');
+      a.stage.classList.toggle('tut-live-crt',crtOn);
+      await a.wait(500);
+      await a.move(th,0.25);
+      await a.click(th,()=>{_tutFlipSwitch(th,!dark,dark?'light':'dark');_tutApplyTokens(a.stage,_tutThemeTokens(true));});
+      await a.wait(900);
+      await a.click(th,()=>{_tutFlipSwitch(th,dark,dark?'dark':'light');_tutApplyTokens(a.stage,_tutThemeTokens(false));});
+      await a.wait(400);
+      await a.move(crt,0.25);
+      await a.click(crt,()=>{_tutFlipSwitch(crt,!crtOn);a.stage.classList.toggle('tut-live-crt',!crtOn);});
+      await a.wait(900);
+      await a.click(crt,()=>{_tutFlipSwitch(crt,crtOn);a.stage.classList.toggle('tut-live-crt',crtOn);});
+      await a.rest();
+    },
+  },
+  'the-eye-icon':{
+    build(stage){
+      const node=_tutFirstFx();if(!node) return false;
+      const head=node.querySelector('.node-head'),thumb=node.querySelector('.node-thumb,canvas');
+      if(!head) return false;
+      const wrap=document.createElement('div');wrap.className='node';wrap.style.width='100%';wrap.dataset.cid='tut-node';
+      wrap.appendChild(_tutClone(head));
+      if(thumb){const t=_tutClone(thumb);t.style.maxHeight='70px';wrap.appendChild(t);}
+      stage.querySelector('.tut-live-inner').appendChild(wrap);
+      return true;
+    },
+    async run(a){
+      const node=_tutQ(a.stage,'tut-node'),eye=a.stage.querySelector('.bypass-btn');
+      if(!eye) return;
+      await a.wait(500);
+      await a.move(eye);
+      await a.click(eye,()=>{eye.classList.add('off');node.classList.add('bypassed');});
+      await a.wait(1100);
+      await a.click(eye,()=>{eye.classList.remove('off');node.classList.remove('bypassed');});
+      await a.rest();
+    },
+  },
+  'every-effect-has':{
+    build(stage){
+      const node=_tutFirstFx();const col=node&&node.querySelector('.mod-ctrl-col');
+      if(!col) return false;
+      const c=_tutClone(col);c.style.width='100%';
+      stage.querySelector('.tut-live-inner').appendChild(c);
+      return true;
+    },
+    async run(a){
+      const keys=[...a.stage.querySelectorAll('.fx-key')];
+      const track=a.stage.querySelector('.knob-track'),thumb=track&&track.querySelector('.knob-thumb');
+      const val=a.stage.querySelector('.knob-val');
+      const start=Math.max(0,keys.findIndex(k=>k.classList.contains('active')));
+      const setActive=i=>keys.forEach((k,j)=>k.classList.toggle('active',j===i));
+      await a.wait(500);
+      for(const d of [1,2,3]){
+        const k=keys[(start+d)%keys.length];if(!k) break;
+        await a.move(k);await a.click(k,()=>setActive((start+d)%keys.length));
+      }
+      if(track&&thumb){
+        const v0=parseFloat(thumb.style.left)/100||0.5;
+        const to=v0>0.6?0.2:0.85;
+        await a.drag(track,thumb,v0,to,v=>{if(val)val.textContent=Math.round(v*100)+'%';});
+        await a.wait(500);
+        thumb.style.left=(v0*100)+'%';if(val)val.textContent=Math.round(v0*100)+'%';
+      }
+      setActive(start);
+      await a.rest();
+    },
+  },
+};
+// returns true when it took over the illustration slot
+function _tutLiveShow(step,illusEl){
+  _tutLiveRun++;
+  const L=TUT_LIVE[step&&step.id];
+  illusEl.classList.remove('tut-live-host');
+  if(!L) return false;
+  const stage=document.createElement('div');stage.className='tut-live';
+  const inner=document.createElement('div');inner.className='tut-live-inner';stage.appendChild(inner);
+  _tutApplyTokens(stage,_tutThemeTokens(false));
+  if(!L.build(stage)) return false;
+  illusEl.innerHTML='';illusEl.appendChild(stage);
+  illusEl.classList.add('tut-live-host');illusEl.style.display='block';
+  // scale the copy to fill the card width (copies keep their real pixel size).
+  // a timer, not rAF: rAF never fires while the tab is hidden
+  setTimeout(()=>{
+    const avail=stage.clientWidth-24, natural=inner.scrollWidth;
+    if(natural>avail) inner.style.zoom=(avail/natural).toFixed(3);
+    const run=_tutLiveRun;
+    const loop=async()=>{
+      try{while(run===_tutLiveRun&&stage.isConnected){await L.run(_tutLiveApi(stage,run));stage.querySelectorAll('.tut-cursor').forEach(c=>c.remove());}}
+      catch(e){if(e!=='stale') console.warn('tutorial illustration',e);}
+    };
+    if(!matchMedia('(prefers-reduced-motion: reduce)').matches) loop();
+  },30);
+  return true;
 }
 
 /* ── TUTORIAL SPOTLIGHT ──
