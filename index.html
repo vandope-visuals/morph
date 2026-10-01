@@ -2800,16 +2800,19 @@ function buildCustomSelect(id, opts, currentVal, onChange){
 }
 
 const GLProcessor=(function(){
-  // gpu-resident path: every pass renders into a pooled fbo texture; the last one is drawn to the
-  // gl canvas' default framebuffer and drawImage'd (gpu→gpu, same task so no preserveDrawingBuffer
-  // needed) into a per-module accelerated 2d canvas, which run() returns. no readPixels, no row flip.
-  // chaining: if srcCanvas is the canvas the previous run() returned this frame, its texture is
-  // reused instead of re-uploading. uploads keep UNPACK_FLIP_Y, so v_uv.y=0 is the image bottom
-  // (same convention the shaders were written for) and the default framebuffer shows it upright.
+  // gpu-resident path, no readPixels / row flip / putImageData:
+  // - each module's result lives in its own texture; run() returns the module's accelerated 2d
+  //   canvas (mod._glOut) marked pending. it is filled lazily — the texture is drawn to the gl
+  //   canvas' default framebuffer and drawImage'd into it (same task, so no preserveDrawingBuffer)
+  //   the first time anything drawImage()s it or getImageData()s its context. every gl→2d hop costs
+  //   ~0.8ms of cross-context sync (M1/ANGLE Metal), so a gl→gl chain only pays it once, at the end
+  //   (plus thumbnails on UI frames).
+  // - chaining: if srcCanvas is a gl output canvas, its texture is used directly (no upload).
+  // - uploads keep UNPACK_FLIP_Y, so v_uv.y=0 is the image bottom (the convention the shaders were
+  //   written for) and the default framebuffer shows it upright.
   let gl=null,glCanvas=null,_ready=false,_gen=0;
   let programs={},vsObj=null,fbo=null,pool=[];
   let texSrc=null,texB=null;           // upload targets {t,w,h}
-  let _lastOut=null,_lastTex=null;     // chaining: canvas returned by the last run + its texture
   const _modGL=new WeakMap();          // per-module persistent textures (color trails)
   const U={t:0,p:0,pi:0,k:0,time:0,cg:null,pal:null};
   const UNIFORMS=['u_src','u_b','u_prev','u_t','u_p','u_time','u_res','u_pi','u_k','u_gain','u_pal'];
@@ -2986,19 +2989,19 @@ const GLProcessor=(function(){
     [0.08,0.08,0.08, 0.24,0,0.31, 0.71,0,0.47, 1,0.31,0, 1,0.86,0.39]
   ].map(a=>new Float32Array(a));
 
-  // multi-pass / stateful effects: (srcTex, extraTex, mod) → output texture (or false)
+  // multi-pass / stateful effects: (srcTex, extraTex, mod, dstTex) → dstTex (or false)
   const PIPES={
-    po_bloom:(s)=>{const a=_pass('po_bloom_h',s,null,_pick(s));return a&&_pass('po_bloom_v',a,s,_pick(s,a));},
-    po_erode:(s)=>{const a=_pass('po_erode_h',s,null,_pick(s));return a&&_pass('po_erode_v',a,s,_pick(s,a));},
-    po_dilate:(s)=>{const a=_pass('po_dilate_h',s,null,_pick(s));return a&&_pass('po_dilate_v',a,s,_pick(s,a));},
-    cfb:(s,ex,mod)=>{
+    po_bloom:(s,ex,mod,d)=>{const a=_pass('po_bloom_h',s,null,_pick(s,d));return a&&_pass('po_bloom_v',a,s,d);},
+    po_erode:(s,ex,mod,d)=>{const a=_pass('po_erode_h',s,null,_pick(s,d));return a&&_pass('po_erode_v',a,s,d);},
+    po_dilate:(s,ex,mod,d)=>{const a=_pass('po_dilate_h',s,null,_pick(s,d));return a&&_pass('po_dilate_v',a,s,d);},
+    cfb:(s,ex,mod,d)=>{
       let st=_modGL.get(mod);
       if(!st||st.gen!==_gen||st.w!==W||st.h!==H){st={a:_mkTex(),b:_mkTex(),w:W,h:H,gen:_gen,init:true};_modGL.set(mod,st);}
       U.k=st.init?1:0;
       const b=_pass('cfb_buf',s,st.a,st.b);
       if(!b) return false;
       st.init=false;const tmp=st.a;st.a=st.b;st.b=tmp;   // st.a = current trail buffer
-      return _pass('cfb_mix',st.a,s,_pick(s,st.a));
+      return _pass('cfb_mix',st.a,s,d);
     },
   };
 
@@ -3019,7 +3022,7 @@ const GLProcessor=(function(){
   }
 
   function _setup(){
-    programs={};pool=[];_lastOut=_lastTex=null;_gen++;
+    programs={};pool=[];_gen++;
     vsObj=gl.createShader(gl.VERTEX_SHADER);gl.shaderSource(vsObj,VS);gl.compileShader(vsObj);
     if(!gl.getShaderParameter(vsObj,gl.COMPILE_STATUS)){console.warn('GL vertex shader error:',gl.getShaderInfoLog(vsObj));return false;}
     // fullscreen quad on attrib 0 (bound at link time), set once
@@ -3042,7 +3045,7 @@ const GLProcessor=(function(){
     // alpha kept (un-premultiplied) so transparent sources survive a gl module like the old readback did
     gl=glCanvas.getContext('webgl2',{preserveDrawingBuffer:false,antialias:false,alpha:true,premultipliedAlpha:false,depth:false,stencil:false});
     if(!gl){console.warn('WebGL2 not available, using CPU fallback');return false;}
-    glCanvas.addEventListener('webglcontextlost',e=>{e.preventDefault();_ready=false;programs={};pool=[];texSrc=texB=null;fbo=null;vsObj=null;_lastOut=_lastTex=null;_gen++;console.warn('GL context lost — cpu fallback until restored');});
+    glCanvas.addEventListener('webglcontextlost',e=>{e.preventDefault();_ready=false;programs={};pool=[];texSrc=texB=null;fbo=null;vsObj=null;_gen++;console.warn('GL context lost — cpu fallback until restored');});
     glCanvas.addEventListener('webglcontextrestored',()=>{glCanvas.width=W;glCanvas.height=H;_ready=_setup();});
     return _setup();
   }
@@ -3103,6 +3106,21 @@ const GLProcessor=(function(){
     return out||true;
   }
 
+  // texture behind a gl output canvas, if still current
+  function _texOf(cv){const st=cv._gls;return st&&st.gen===_gen&&st.w===W&&st.h===H?st.tex:null;}
+  // fill a pending output canvas from its texture
+  function _materialize(cv){
+    cv._glp=false;
+    const tex=_ready&&_texOf(cv);
+    if(!tex) return;
+    _pass('_copy',tex,null,null);
+    const c=cv._gls.ctx;c.globalCompositeOperation='copy';_drawImage.call(c,glCanvas,0,0);
+  }
+  // any read of a pending output canvas materializes it first, so callers keep plain canvas semantics
+  const _drawImage=CanvasRenderingContext2D.prototype.drawImage,_getImageData=CanvasRenderingContext2D.prototype.getImageData;
+  CanvasRenderingContext2D.prototype.drawImage=function(img){if(img&&img._glp)_materialize(img);return _drawImage.apply(this,arguments);};
+  CanvasRenderingContext2D.prototype.getImageData=function(){const c=this.canvas;if(c&&c._glp)_materialize(c);return _getImageData.apply(this,arguments);};
+
   // ensure offscreen canvas exists for a module (processors' cpu paths expect it)
   function _ensureOff(mod){
     if(!mod.offscreen){
@@ -3115,44 +3133,57 @@ const GLProcessor=(function(){
   return {
     init(){_ready=initGL();return _ready;},
     ready(){return _ready;},
-    // start of a render frame: forget the chaining candidate
-    frame(){_lastOut=_lastTex=null;},
+    frame(){},  // per-frame hook (chaining no longer needs frame tracking)
+    // materialize a pending output canvas now (reads through drawImage/getImageData do it implicitly)
+    flush(cv){if(cv&&cv._glp)_materialize(cv);},
+    // drop a module's gl resources (optional; they are also released when the module is collected)
+    release(mod){
+      const oc=mod._glOut;
+      if(oc){if(_ready&&oc._gls&&oc._gls.gen===_gen)gl.deleteTexture(oc._gls.tex);oc._gls=null;oc._glp=false;oc.width=oc.height=1;}
+      mod._glOut=mod._glOutCtx=null;
+      const st=_modGL.get(mod);if(st&&_ready&&st.gen===_gen){gl.deleteTexture(st.a);gl.deleteTexture(st.b);}
+      _modGL.delete(mod);
+    },
     resize(w,h){
       if(!_ready) return;
       glCanvas.width=w;glCanvas.height=h;
       pool.forEach(t=>gl.deleteTexture(t));pool=[];
       texSrc.w=texSrc.h=texB.w=texB.h=0;
-      _lastOut=_lastTex=null;
+      // module textures are re-created at their next run; pending canvases keep their stale 2d copy
     },
 
     // Main entry: run a GL effect on srcCanvas (extraCanvas → u_b/u_prev on unit 1).
     // Returns a canvas (the module's gpu-backed mod._glOut) the caller can drawImage/getImageData
-    // from, or null on failure (caller falls back to cpu). Don't draw into the returned canvas.
+    // from, or null on failure (caller falls back to cpu). The canvas is owned by GLProcessor:
+    // read it, don't draw into it.
     run(shaderName,mod,srcCanvas,extraCanvas){
       if(!_ready||!srcCanvas||(!SHADERS[shaderName]&&!PIPES[shaderName])) return null;
       _ensureOff(mod);
       try{
-        const src=(srcCanvas===_lastOut&&_lastTex)?_lastTex:_upload(texSrc,srcCanvas);
-        const ex=extraCanvas?((extraCanvas===_lastOut&&_lastTex)?_lastTex:_upload(texB,extraCanvas)):null;
+        const src=_texOf(srcCanvas)||_upload(texSrc,srcCanvas);
+        const ex=extraCanvas?(_texOf(extraCanvas)||_upload(texB,extraCanvas)):null;
+        // module output canvas + texture
+        let oc=mod._glOut;
+        if(!oc){oc=mod._glOut=document.createElement('canvas');oc.width=W;oc.height=H;mod._glOutCtx=oc.getContext('2d');}
+        else if(oc.width!==W||oc.height!==H){oc.width=W;oc.height=H;}
+        let st=oc._gls;
+        if(!st||st.gen!==_gen||st.w!==W||st.h!==H){
+          if(st&&st.gen===_gen) gl.deleteTexture(st.tex);
+          st=oc._gls={tex:_mkTex(),ctx:mod._glOutCtx,w:W,h:H,gen:_gen};
+        }
+        let dst=st.tex;
+        if(dst===src||dst===ex){const t=_pick(src,ex);pool[pool.indexOf(t)]=dst;st.tex=dst=t;} // never render into an input
         U.t=mod.intensity||0;U.p=mod.param||0;U.k=0;
         U.pi=shaderName==='false_color'?Math.floor(U.p*3.99):mod.activeFx||0;
         U.pal=shaderName==='false_color'?FC_PAL[Math.min(3,Math.max(0,U.pi))]:null;
         U.cg=mod.channelGain||null;
         U.time=(performance.now()*0.001)%3600;   // wrapped: noise shaders lose precision on big floats
         const pipe=PIPES[shaderName];
-        const out=pipe?pipe(src,ex,mod):_pass(shaderName,src,ex,_pick(src,ex));
+        const out=pipe?pipe(src,ex,mod,dst):_pass(shaderName,src,ex,dst);
         if(!out) return null;
-        _pass('_copy',out,null,null);
-        let oc=mod._glOut;
-        if(!oc){oc=mod._glOut=document.createElement('canvas');oc.width=W;oc.height=H;mod._glOutCtx=oc.getContext('2d');}
-        else if(oc.width!==W||oc.height!==H){oc.width=W;oc.height=H;}
-        const octx=mod._glOutCtx;
-        octx.globalCompositeOperation='copy';
-        octx.drawImage(glCanvas,0,0);
-        _lastOut=oc;_lastTex=out;
+        oc._glp=true; // filled on first read
         return oc;
       }catch(e){
-        _lastOut=_lastTex=null;
         // tainted (cross-origin) input: texImage2D throws SecurityError; the cpu fallback will
         // throw it again from getImageData and renderFrame resets the mix canvas
         if(e&&e.name!=='SecurityError'&&!mod._glWarned){mod._glWarned=true;console.warn('GL run error:',e);}
