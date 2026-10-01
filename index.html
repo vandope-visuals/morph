@@ -3389,7 +3389,8 @@ function renderFrame(){
     }
     if(processed) cur=processed; // only advance if valid
     // only update visible thumbnail at UI rate
-    if(_drawUi&&mod.cv){syncCanvasSize(mod.cv);mod.cv.getContext('2d').drawImage(cur,0,0,mod.cv.width,mod.cv.height);}
+    // (modulators draw their own viz into mod.cv — don't paint the chain over it)
+    if(_drawUi&&mod.cv&&mod.type!=='modulator'){syncCanvasSize(mod.cv);mod.cv.getContext('2d').drawImage(cur,0,0,mod.cv.width,mod.cv.height);}
   });
 
   _frameSrcB=undefined;
