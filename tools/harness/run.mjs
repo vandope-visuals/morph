@@ -263,6 +263,7 @@ if (only.includes('bench')) {
   // per effect × mode, image source only; value = ms/frame minus imageOnly
   b.fx = {};
   for (const [name, type] of Object.entries(EFFECTS)) {
+    if (name === 'keyer') { b.fx.keyer = null; continue; } // measured below, with a B source
     b.fx[name] = await page.evaluate(([name, type, base]) => {
       __h.clearModules(); const m = __h.add(name, type); const out = [];
       for (let fx = 0; fx < 8; fx++) {
@@ -272,6 +273,16 @@ if (only.includes('bench')) {
       __h.clearModules(); return out;
     }, [name, type, b.imageOnly]);
   }
+  // keyer keys against the raw B source (without one it is a plain copy): load the video fixture
+  // into B, measure against an A+B baseline, then clear B so later numbers are unchanged
+  await loadVideo(page, 'B', video);
+  await page.waitForTimeout(300);
+  b.fx.keyer = await page.evaluate(() => {
+    __h.clearModules(); const base = __h.frames(30);
+    const m = __h.add('keyer', 'processor'); const out = [];
+    for (let fx = 0; fx < 8; fx++) { try { setFx(m.id, fx); } catch (e) { m.activeFx = fx; } out.push(+(__h.frames(20) - base).toFixed(2)); }
+    __h.clearModules(); cleanupSource('B'); return out;
+  });
 
   // generator sources (A only, no effects)
   b.pattern = []; b.math = [];
