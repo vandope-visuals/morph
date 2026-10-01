@@ -4020,24 +4020,25 @@ function processGeomModule(mod, srcCanvas){
     }
     case 'perspective': {
       ctx.restore();
-      if(!mod.geomOffscreen2){
-        mod.geomOffscreen2=document.createElement('canvas');
+      // scratch canvas follows the resolution (it was never resized: black band after a governor step)
+      if(!mod.geomOffscreen2||mod.geomOffscreen2.width!==W||mod.geomOffscreen2.height!==H){
+        if(!mod.geomOffscreen2) mod.geomOffscreen2=document.createElement('canvas');
         mod.geomOffscreen2.width=W; mod.geomOffscreen2.height=H;
         mod.geomCtx2=mod.geomOffscreen2.getContext('2d',{willReadFrequently:true});
       }
+      mod.geomCtx2.clearRect(0,0,W,H);
       mod.geomCtx2.drawImage(srcCanvas,0,0,W,H);
-      const src=mod.geomCtx2.getImageData(0,0,W,H);
-      const dst=ctx.createImageData(W,H);
+      const img=mod.geomCtx2.getImageData(0,0,W,H);
+      // shift each row in place (copyWithin + edge fill) instead of a per-pixel copy into a fresh ImageData
+      const p32=new Uint32Array(img.data.buffer);
       const skew=(p-0.5)*1.2*t;
       for(let y=0;y<H;y++){
-        const offset=Math.round((y/H-0.5)*skew*W);
-        for(let x=0;x<W;x++){
-          const sx=Math.max(0,Math.min(W-1,x+offset));
-          const si=(y*W+sx)*4, di=(y*W+x)*4;
-          dst.data[di]=src.data[si];dst.data[di+1]=src.data[si+1];dst.data[di+2]=src.data[si+2];dst.data[di+3]=255;
-        }
+        const o=y*W,off=Math.max(-W,Math.min(W,Math.round((y/H-0.5)*skew*W)));
+        if(off>0){const e=p32[o+W-1];p32.copyWithin(o,o+off,o+W);p32.fill(e,o+W-off,o+W);}
+        else if(off<0){const e=p32[o];p32.copyWithin(o-off,o,o+W+off);p32.fill(e,o,o-off);}
+        for(let i=o,e2=o+W;i<e2;i++) p32[i]|=0xff000000;
       }
-      ctx.putImageData(dst,0,0);
+      ctx.putImageData(img,0,0);
       return mod.offscreen;
     }
     default:
