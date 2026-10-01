@@ -1555,106 +1555,111 @@ body.tv[data-tvch="4"] .chain-marquee-wrap{display:none;}
 body.tv[data-tvch="4"] .bot-r{grid-area:meta;}
 
 /* clip the CRT overlay to the TV stage */
-body.tv #crt-overlay{
+body.tv .crt-overlay{
   inset:auto;
   left:50%;top:50%;
   width:640px;height:480px;
   transform:translate(-50%,-50%);
-  border-radius:0;
 }
 
 /* ============================================================
-   CRT MODE
+   CRT MODE — compositor-only (ported from the design system's crt.css).
+   Every animated layer moves with transform or changes opacity; nothing
+   animates background-position/top/width, so a CRT frame never repaints
+   the viewport. Layers are oversized so a translate shows the same pixels
+   the old background-position shift did. Colours are ink/paper, so dark
+   mode is the faithful inversion.
    ============================================================ */
-#crt-overlay{
+.crt-overlay{
   display:none;
   position:fixed;inset:0;z-index:999999;
   pointer-events:none;
-  border-radius:0;
   overflow:hidden;
+  contain:strict;
 }
-body.crt #crt-overlay{ display:block; }
+body.crt .crt-overlay{display:block;}
 
-/* subtle screen warp — oval vignette via radial gradient */
-#crt-overlay::before{
+/* vignette: oval shade toward the corners (static) */
+.crt-overlay::before{
   content:'';
   position:absolute;inset:0;
-  background:
-    radial-gradient(ellipse 80% 75% at 50% 50%,
-      transparent 60%,
-      color-mix(in srgb, var(--ink) 55%, transparent) 100%);
-  pointer-events:none;
+  background:radial-gradient(ellipse 80% 75% at 50% 50%,transparent 60%,color-mix(in srgb, var(--ink) 55%, transparent) 100%);
   z-index:1;
 }
 
-/* scanlines */
-#crt-overlay::after{
-  content:'';
-  position:absolute;inset:0;
-  background:repeating-linear-gradient(
-    to bottom,
-    transparent 0px,
-    transparent 3px,
-    color-mix(in srgb, var(--ink) 13%, transparent) 3px,
-    color-mix(in srgb, var(--ink) 13%, transparent) 4px
-  );
-  pointer-events:none;
+/* scanlines: 1px shade every 4px; 120px taller and translated down
+   = the old background-position 0 -> 120px drift */
+.crt-scan{
+  position:absolute;left:0;right:0;top:-120px;bottom:0;
+  background:repeating-linear-gradient(to bottom,transparent 0,transparent 3px,color-mix(in srgb, var(--ink) 13%, transparent) 3px,color-mix(in srgb, var(--ink) 13%, transparent) 4px);
   z-index:2;
-  animation:crt-scroll 8s linear infinite;
+  will-change:transform;
+  animation:crt-scan 8s linear infinite;
 }
-@keyframes crt-scroll{
-  from{background-position:0 0;}
-  to{background-position:0 120px;}
-}
+@keyframes crt-scan{from{transform:translate3d(0,0,0);}to{transform:translate3d(0,120px,0);}}
 
-/* fuzz layer — SVG noise */
-#crt-fuzz{
-  position:absolute;inset:0;z-index:3;
+/* fuzz: SVG fractal noise jittered by stepped offsets. 40px oversized on
+   every side; background-position puts the tile where it sat before */
+.crt-fuzz{
+  position:absolute;inset:-40px;z-index:3;
   opacity:0.045;
   background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/></filter><rect width='200' height='200' filter='url(%23n)' opacity='1'/></svg>");
   background-size:200px 200px;
+  background-position:40px 40px;
+  will-change:transform;
   animation:crt-fuzz 0.08s steps(1) infinite;
 }
 @keyframes crt-fuzz{
-  0%{background-position:0 0;}
-  25%{background-position:-40px 20px;}
-  50%{background-position:20px -30px;}
-  75%{background-position:30px 10px;}
-  100%{background-position:-10px -20px;}
+  0%{transform:translate3d(0,0,0);}
+  25%{transform:translate3d(-40px,20px,0);}
+  50%{transform:translate3d(20px,-30px,0);}
+  75%{transform:translate3d(30px,10px,0);}
+  100%{transform:translate3d(-10px,-20px,0);}
 }
 
-/* screen warp: slight perspective curve on the whole app */
+/* rolling band: 40px lighter stripe, moved by a WAAPI transform (JS) */
+.crt-roller{
+  position:absolute;left:0;right:0;top:0;height:40px;
+  background:color-mix(in srgb, var(--paper) 3%, transparent);
+  z-index:4;
+  will-change:transform;
+}
+/* flicker: whole-screen dim pulse, opacity set by JS (0.02-0.05) */
+.crt-flicker{position:absolute;inset:0;background:var(--ink);opacity:0;z-index:6;will-change:opacity;}
+
+/* screen curvature + bezel on the shell (static, painted once) */
 body.crt .app{
   border-radius:12px;
   overflow:hidden;
   box-shadow:0 0 0 8px var(--ink), 0 0 60px 8px color-mix(in srgb, var(--ink) 80%, transparent);
 }
 
-/* sporadic glitch line */
-#crt-glitch-line{
-  position:absolute;
-  left:0;right:0;
-  height:2px;
+/* glitch tear line + band: positioned by JS with transform only */
+.crt-glitch-line{
+  position:absolute;left:0;top:0;
+  width:100%;height:2px;
   background:color-mix(in srgb, var(--paper) 70%, transparent);
   opacity:0;
   z-index:5;
-  pointer-events:none;
+  transform-origin:0 0;
+  will-change:transform,opacity;
 }
-#crt-glitch-band{
-  position:absolute;
-  left:0;right:0;
+.crt-glitch-band{
+  position:absolute;left:0;right:0;top:0;
   height:18px;
   background:color-mix(in srgb, var(--paper) 6%, transparent);
   opacity:0;
   z-index:4;
-  pointer-events:none;
-  mix-blend-mode:screen;
+  will-change:transform,opacity;
+}
+@media (prefers-reduced-motion:reduce){
+  .crt-scan,.crt-fuzz{animation:none;}
 }
 
 </style>
 </head>
 <body class="dark crt">
-<div id="crt-overlay"><div id="crt-fuzz"></div><div id="crt-glitch-line"></div><div id="crt-glitch-band"></div></div>
+<div id="crt-overlay" class="crt-overlay" aria-hidden="true"><div id="crt-scan" class="crt-scan"></div><div id="crt-fuzz" class="crt-fuzz"></div><div id="crt-glitch-line" class="crt-glitch-line"></div><div id="crt-glitch-band" class="crt-glitch-band"></div></div>
 
 
 <div class="app" oncontextmenu="return false">
@@ -7767,14 +7772,14 @@ function _startCRTGlitch(){
   // rolling band — a slow drifting lighter horizontal stripe
   const roller=document.createElement('div');
   roller.id='crt-roller';
-  roller.style.cssText='position:absolute;left:0;right:0;height:40px;background:color-mix(in srgb, var(--paper) 3%, transparent);pointer-events:none;z-index:4;top:0;transition:none;will-change:transform;';
+  roller.className='crt-roller';
   document.getElementById('crt-overlay').appendChild(roller);
   _crtRoll(roller,-40);
 
   // subtle flicker — whole overlay dims slightly on irregular cadence
   const flickerEl=document.createElement('div');
   flickerEl.id='crt-flicker';
-  flickerEl.style.cssText='position:absolute;inset:0;background:var(--ink);opacity:0;pointer-events:none;z-index:6;';
+  flickerEl.className='crt-flicker';
   document.getElementById('crt-overlay').appendChild(flickerEl);
   function doFlicker(){
     if(!document.body.classList.contains('crt')||!flickerEl.isConnected){ flickerEl.remove(); return; }
@@ -7791,18 +7796,19 @@ function _startCRTGlitch(){
     if(!document.body.classList.contains('crt')){ _stopCRTGlitch(); return; }
     if(Math.random()>0.30) return;
     const y=Math.random()*100;
+    // compositor-only: position with transform, never top/left/width
+    const ov=document.getElementById('crt-overlay');
+    const h=(ov&&ov.clientHeight)||window.innerHeight;
 
-    // thin bright horizontal tear line
+    // thin bright horizontal tear line (x% of the overlay, scaled to 40-100% width)
     if(line){
-      line.style.top=y+'%';
+      line.style.transform='translate3d('+(Math.random()*30)+'%,'+(y/100*h)+'px,0) scaleX('+(0.4+Math.random()*0.6).toFixed(3)+')';
       line.style.opacity='1';
-      line.style.width=(40+Math.random()*60)+'%';
-      line.style.left=(Math.random()*30)+'%';
       _crtTo(()=>{ if(line) line.style.opacity='0'; }, 60+Math.random()*80);
     }
     // wider semi-transparent band
     if(band && Math.random()>0.5){
-      band.style.top=(y+Math.random()*4-2)+'%';
+      band.style.transform='translate3d(0,'+((y+Math.random()*4-2)/100*h)+'px,0)';
       band.style.opacity='1';
       _crtTo(()=>{ if(band) band.style.opacity='0'; }, 80+Math.random()*120);
     }
