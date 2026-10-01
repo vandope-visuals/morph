@@ -5513,13 +5513,15 @@ function processVhsModule(mod,srcCanvas){
   return mod.offscreen;
 }
 
+// per-module scratch copy of the frame (was a fresh W×H×4 array per frame); re-sized when the resolution changes
+function _modScratch(mod,len){if(!mod._scratch||mod._scratch.length!==len)mod._scratch=new Uint8ClampedArray(len);return mod._scratch;}
 function processBlockCorruptModule(mod,srcCanvas){
   if(_shouldSkipHeavy(mod)) return mod._lastResult;
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
   const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
-  const tmp=new Uint8ClampedArray(d);
+  const tmp=_modScratch(mod,d.length); tmp.set(d);
   const num=Math.floor(t*p*50)+2;
   if(fx===0){ // stream corrupt — horizontal band shifts
     const bandH=Math.floor(4+p*20);
@@ -5587,18 +5589,22 @@ function processBlockCorruptModule(mod,srcCanvas){
     }
   } else if(fx===6){ // freeze block — blocks get frozen then slowly release
     const bs=Math.floor(8+p*24);
-    if(!mod._freezeBlocks) mod._freezeBlocks={};
+    // cache keyed by block origin for one block size + resolution; dropped when either changes
+    // (was keyed by origin only: black pixels after a size change, and it grew forever)
+    let fb=mod._freezeBlocks;
+    if(!fb||fb.bs!==bs||fb.w!==W||fb.h!==H) fb=mod._freezeBlocks={bs,w:W,h:H,map:new Map()};
     for(let b=0;b<num;b++){
       const bx=Math.floor(Math.random()*(W/bs))*bs,by=Math.floor(Math.random()*(H/bs))*bs;
-      const key=bx+','+by;
-      if(!mod._freezeBlocks[key]||Math.random()<0.05*t){
-        const fr=[];
+      const key=by*W+bx;
+      let fr=fb.map.get(key);
+      if(!fr||Math.random()<0.05*t){
+        if(!fr){fr=new Uint8ClampedArray(bs*bs*3);fb.map.set(key,fr);}
+        let fi=0;
         for(let y=0;y<bs&&by+y<H;y++)for(let x=0;x<bs&&bx+x<W;x++){
-          const si=((by+y)*W+(bx+x))*4;fr.push(tmp[si],tmp[si+1],tmp[si+2]);
+          const si=((by+y)*W+(bx+x))*4;fr[fi++]=tmp[si];fr[fi++]=tmp[si+1];fr[fi++]=tmp[si+2];
         }
-        mod._freezeBlocks[key]=fr;
       }
-      const fr=mod._freezeBlocks[key];let fi=0;
+      let fi=0;
       for(let y=0;y<bs&&by+y<H;y++)for(let x=0;x<bs&&bx+x<W;x++){
         const di=((by+y)*W+(bx+x))*4;d[di]=fr[fi++];d[di+1]=fr[fi++];d[di+2]=fr[fi++];
       }
@@ -6081,6 +6087,7 @@ function setFx(modId,fxIdx){
   if(mod.name==='geometry') mod.geomAngle=0;
   if(mod.name==='LFO'){ mod.lfoPhase=0; mod._lfoCyc=0; delete mod._lfoSmooth; }
   if(mod.name==='feedback'){ mod.fbPrev=null; mod.fbMirrorX=0; mod.fbFrame=0; }
+  if(mod.name==='blockcorrupt') mod._freezeBlocks=null;
   _fxKeysOf('fxkeys-'+modId).forEach((k,i)=>k.classList.toggle('active',i===fxIdx));
   const lbl=document.getElementById('param-lbl-'+modId);
   if(lbl){
