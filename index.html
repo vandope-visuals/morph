@@ -3249,7 +3249,7 @@ function _governorTick(fps,cost){
 }
 
 // output window canvas, looked up once per window (was getElementById every frame)
-let _ocWin=null,_ocEl=null,_ocCtx=null,_liveIndOn=false;
+let _ocWin=null,_ocEl=null,_ocCtx=null,_liveIndOn=false,_frameSrcB=undefined;
 function _drawOutputWin(){
   const ow=state.outputWin;
   if(!ow||!state._outputWinReady) return;
@@ -3294,6 +3294,7 @@ function renderFrame(){
 
   const cvA2=getSourceCanvas('A');
   const cvB2=getSourceCanvas('B');
+  _frameSrcB=cvB2; // processors reuse this frame's B (keyer) instead of re-rendering the source
 
   // update left panel previews (throttled)
   if(_drawUi) ['A','B'].forEach(s=>{
@@ -3332,6 +3333,7 @@ function renderFrame(){
   if(!cvA2&&!cvB2){
     // nothing to render — still tick modulators, and keep the outputs live (black) so the
     // audience window / recording don't freeze on the last frame
+    _frameSrcB=undefined;
     tickLFOs();tickEnvelopes();tickAudio();tickSequencers();tickPerlin();tickXYPads();tickRandomWalks();
     outputCtx.fillStyle='#000';outputCtx.fillRect(0,0,W,H);
     if(_drawUi){_drawPreview(masterCv,null);_drawPreview(document.getElementById('bot-master-cv'),null);}
@@ -3389,6 +3391,8 @@ function renderFrame(){
     // only update visible thumbnail at UI rate
     if(_drawUi&&mod.cv){syncCanvasSize(mod.cv);mod.cv.getContext('2d').drawImage(cur,0,0,mod.cv.width,mod.cv.height);}
   });
+
+  _frameSrcB=undefined;
 
   // run modulators
   tickLFOs();
@@ -5001,12 +5005,13 @@ const KEYER_FX=[
 function processKeyerModule(mod,srcCanvas){
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const fx=KEYER_FX[mod.activeFx];
-  const hasB=!!getSourceCanvas('B');
+  // raw B, rendered once per frame by renderFrame (getSourceCanvas redraws the source: ~2.7ms for video)
+  const bCv=_frameSrcB!==undefined?_frameSrcB:getSourceCanvas('B');
+  const hasB=!!bCv;
   if(GLProcessor.ready()&&hasB&&fx){
     const GL_KEY={luma_dark:'keyer_luma_dark',luma_bright:'keyer_luma_bright',chroma_green:'keyer_chroma_green',chroma_blue:'keyer_chroma_blue',luma_invert:'keyer_luma_invert',chroma_custom:'keyer_chroma_custom',isolate:'keyer_isolate',contrast_key:'keyer_contrast'};
     if(GL_KEY[fx.id]){
-      const bCanvas=getSourceCanvas('B');
-      const r=GLProcessor.run(GL_KEY[fx.id],mod,srcCanvas,bCanvas);
+      const r=GLProcessor.run(GL_KEY[fx.id],mod,srcCanvas,bCv);
       if(r) return r;
     }
   }
@@ -5023,7 +5028,7 @@ function processKeyerModule(mod,srcCanvas){
     mod._tmpBCtx=mod._tmpB.getContext('2d',{willReadFrequently:true});
   }
   const tctx=mod._tmpBCtx;
-  const _cvB=getSourceCanvas('B')||cvMix;
+  const _cvB=bCv||cvMix;
   tctx.drawImage(_cvB,0,0,W,H);
   const bData=tctx.getImageData(0,0,W,H);
   const bd=bData.data;
