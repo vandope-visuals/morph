@@ -1314,7 +1314,13 @@ body.dark .bypass-btn.off{background:var(--ink)!important;color:var(--paper);bor
 body.dark .bypass-btn.off rect{fill:var(--paper);}
 
 /* ── TUTORIAL ── card is ink-faced: .inverse flips the tokens inside it (and back in dark) */
-#tut-card{position:fixed;top:0;left:50%;transform:translateX(-50%);width:340px;background:var(--paper);border:2px solid var(--ink);border-top:none;z-index:9000;display:none;box-shadow:4px 4px 0 var(--ink);zoom:1.5;}
+#tut-card{position:fixed;top:0;left:50%;transform:translateX(-50%);width:340px;background:var(--paper);border:2px solid var(--ink);z-index:9000;display:none;box-shadow:4px 4px 0 var(--ink);zoom:1.5;}
+/* spotlight: dims everything except the step's focus rects. sits under the card
+   and every popup/dropdown (99000+), never takes clicks */
+#tut-dim{position:fixed;inset:0;z-index:8950;pointer-events:none;display:none;}
+#tut-dim svg{display:block;width:100%;height:100%;}
+#tut-dim path{fill:rgba(0,0,0,0.62);fill-rule:evenodd;}
+#tut-dim rect{fill:none;stroke:var(--ink);stroke-width:2;}
 /* tab row sits above the card border */
 #tut-card .tc-tabs{display:flex;align-items:flex-end;gap:0;padding:0 4px;background:var(--paper);background-image:var(--stripes-h);background-repeat:repeat;position:relative;z-index:1;border-bottom:2px solid var(--ink);}
 #tut-card .tc-tab{
@@ -1858,24 +1864,24 @@ body.crt .app{
     <button type="button" class="mitem" onclick="addModule('keyer','processor','#f97316')"><span class="mitem-icon">⬡</span><span class="mitem-name">keyer</span></button>
     <button type="button" class="mitem" onclick="addModule('color','processor','#f97316')"><span class="mitem-icon">◑</span><span class="mitem-name">color</span></button>
     <button type="button" class="mitem" onclick="addModule('geometry','processor','#f97316')"><span class="mitem-icon">◻</span><span class="mitem-name">geometry</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('feedback','processor','#f97316')"><span class="mitem-icon">∞</span><span class="mitem-name">feedback</span><span class="mitem-heavy-badge">heavy</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('pixelops','processor','#f97316')"><span class="mitem-icon">▦</span><span class="mitem-name">pixel operations</span><span class="mitem-heavy-badge">heavy</span></button>
+    <button type="button" class="mitem" onclick="addModule('feedback','processor','#f97316')"><span class="mitem-icon">∞</span><span class="mitem-name">feedback</span></button>
+    <button type="button" class="mitem" onclick="addModule('pixelops','processor','#f97316')"><span class="mitem-icon">▦</span><span class="mitem-name">pixel operations</span></button>
     <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('ascii','processor','#f97316')"><span class="mitem-icon">⌨</span><span class="mitem-name">ascii</span><span class="mitem-heavy-badge">heavy</span></button>
-    <div class="sec-lbl" data-tip="glitch">glitch</div>
+    <div class="sec-lbl" id="glitch-sec-lbl" data-tip="glitch">glitch</div>
     <button type="button" class="mitem" onclick="addModule('vhs','glitch','#e11d48')"><span class="mitem-icon">▷</span><span class="mitem-name">VHS</span></button>
-    <button type="button" class="mitem" onclick="addModule('signalnoise','glitch','#e11d48')"><span class="mitem-icon">⣿</span><span class="mitem-name">signal noise</span></button>
+    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('signalnoise','glitch','#e11d48')"><span class="mitem-icon">⣿</span><span class="mitem-name">signal noise</span><span class="mitem-heavy-badge">heavy</span></button>
     <button type="button" class="mitem" onclick="addModule('rowshift','glitch','#e11d48')"><span class="mitem-icon">≡</span><span class="mitem-name">row shift</span></button>
     <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('datamosh','glitch','#e11d48')"><span class="mitem-icon">◧</span><span class="mitem-name">datamosh</span><span class="mitem-heavy-badge">heavy</span></button>
     <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('blockcorrupt','glitch','#e11d48')"><span class="mitem-icon">▩</span><span class="mitem-name">block corrupt</span><span class="mitem-heavy-badge">heavy</span></button>
     <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('pixelsort','glitch','#e11d48')"><span class="mitem-icon">↕</span><span class="mitem-name">pixel sort</span><span class="mitem-heavy-badge">heavy</span></button>
-    <div class="sec-lbl" data-tip="modulators">modulators</div>
-    <button type="button" class="mitem" id="si-oscillator" onclick="addModule('LFO','modulator','#000')"><span class="mitem-icon">◎</span><span class="mitem-name">oscillator</span></button>
-    <button type="button" class="mitem" onclick="addModule('envelope','modulator','#000')" style="display:none;"><span class="mitem-icon">◬</span><span class="mitem-name">envelope</span></button>
-    <button type="button" class="mitem" onclick="addModule('xypad','modulator','#000')"><span class="mitem-icon">⊕</span><span class="mitem-name">XY pad</span></button>
-    <button type="button" class="mitem" onclick="addModule('randwalk','modulator','#000')"><span class="mitem-icon">⟿</span><span class="mitem-name">random walk</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('sequencer','modulator','#000')"><span class="mitem-icon">▤</span><span class="mitem-name">sequencer</span><span class="mitem-heavy-badge">heavy</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('audio','modulator','#000')"><span class="mitem-icon">♪</span><span class="mitem-name">audio</span><span class="mitem-heavy-badge">heavy</span></button>
-    <button type="button" class="mitem mitem-heavy" data-heavy="1" onclick="addModule('perlin','modulator','#000')"><span class="mitem-icon">〜</span><span class="mitem-name">perlin noise</span><span class="mitem-heavy-badge">heavy</span></button>
+    <div class="sec-lbl" id="mod-sec-lbl" data-tip="modulators">modulators</div>
+    <button type="button" class="mitem" id="si-oscillator" data-mod="1" onclick="addModule('LFO','modulator','#000')"><span class="mitem-icon">◎</span><span class="mitem-name">oscillator</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('envelope','modulator','#000')" style="display:none;"><span class="mitem-icon">◬</span><span class="mitem-name">envelope</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('xypad','modulator','#000')"><span class="mitem-icon">⊕</span><span class="mitem-name">XY pad</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('randwalk','modulator','#000')"><span class="mitem-icon">⟿</span><span class="mitem-name">random walk</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('sequencer','modulator','#000')"><span class="mitem-icon">▤</span><span class="mitem-name">sequencer</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('audio','modulator','#000')"><span class="mitem-icon">♪</span><span class="mitem-name">audio</span></button>
+    <button type="button" class="mitem" data-mod="1" onclick="addModule('perlin','modulator','#000')"><span class="mitem-icon">〜</span><span class="mitem-name">perlin noise</span></button>
   </div>
 </aside>
 
@@ -1930,7 +1936,7 @@ body.crt .app{
       <div class="boot-title" id="boot-title">m-or.ph</div>
       <div class="boot-sub">modular object rendering &amp; processing hub</div>
       <div class="boot-body">
-        <p>m-or.ph is a web-based AV tool for live on-the-go performance.<br>Made for VJs, experimental artists, in-house party visual guys,<br>or that guy who borrowed their friend's laptop 10 minutes before the show. One file. One browser. Any screen. Any machine.</p>
+        <p>m-or.ph is a web-based AV tool for live on-the-go performance. Made for VJs, experimental artists, in-house party visual guys, or that guy who borrowed their friend's laptop 10 minutes before the show. One file. One browser. Any screen. Any machine.</p>
       </div>
       <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding-top:24px;gap:0;">
         <button class="boot-btn boot-btn-main" type="button" onclick="launchSequence();return false;">INITIALIZE</button>
@@ -4085,8 +4091,8 @@ const TIPS={
   effects:{icon:'◑',title:'effects',tips:[
     'The effects panel is where you build your chain.',
     'Effects are grouped into three categories: <b>processors</b>, <b>glitch</b>, and <b>modulators</b>.',
-    'Click any effect to add it. Up to 5 effects at once.',
-    'Effects marked <b>HEAVY</b> cost more to run. Watch the FPS counter.'
+    'Click any effect to add it. Up to 10 effects at once, plus up to 6 modulators.',
+    'Effects marked <b>HEAVY</b> still run on the CPU and cost more. Up to 3 at once. Watch the FPS counter.'
   ]},
   processors:{icon:'◑',title:'processors',tips:[
     'Processors transform the image cleanly.',
@@ -6469,39 +6475,46 @@ const MODULE_PROCESSORS={
 
 /* ── MODULE SYSTEM ── */
 
-const HEAVY_MODULES=new Set(['feedback','pixelops','ascii','datamosh','blockcorrupt','pixelsort','sequencer','audio','perlin']);
-const MAX_TOTAL=5;
-const MAX_HEAVY=2;
+// v1.6 moved most effects onto the GPU (~1-2ms each at 854x480 on an M1), so
+// the cap is on effects only; modulators barely render and get their own
+// ceiling. HEAVY = the CPU paths that still cost 3-13ms a frame.
+const HEAVY_MODULES=new Set(['ascii','signalnoise','datamosh','blockcorrupt','pixelsort']);
+const MAX_FX=10;
+const MAX_HEAVY=3;
+const MAX_MODS=6;
 
+const _isMod=m=>m.type==='modulator';
+function getFxCount(){ return state.modules.filter(m=>!_isMod(m)).length; }
+function getModCount(){ return state.modules.filter(_isMod).length; }
 function getHeavyCount(){ return state.modules.filter(m=>HEAVY_MODULES.has(m.name)).length; }
 
 function updateCapState(){
-  const total=state.modules.length;
+  const fx=getFxCount();
+  const mods=getModCount();
   const heavy=getHeavyCount();
-  const atTotal=total>=MAX_TOTAL;
+  const atFx=fx>=MAX_FX;
   const atHeavy=heavy>=MAX_HEAVY;
+  const atMods=mods>=MAX_MODS;
 
   document.querySelectorAll('.mitem[data-heavy]').forEach(el=>{
-    el.classList.toggle('cap-locked', atHeavy||atTotal);
+    el.classList.toggle('cap-locked', atHeavy||atFx);
   });
-  document.querySelectorAll('.mitem:not([data-heavy])').forEach(el=>{
+  document.querySelectorAll('.mitem[data-mod]').forEach(el=>{
+    el.classList.toggle('cap-locked', atMods);
+  });
+  document.querySelectorAll('.mitem:not([data-heavy]):not([data-mod])').forEach(el=>{
     if(!el.classList.contains('src-item'))
-      el.classList.toggle('cap-locked', atTotal);
+      el.classList.toggle('cap-locked', atFx);
   });
 
   const stEl=document.getElementById('st');
-  if(atTotal){
-    stEl.textContent='max modules reached';
-    clearTimeout(setStatus._t);
-    setStatus._cap=true;
-  } else if(atHeavy){
-    stEl.textContent='max heavy reached';
+  if(atFx||atHeavy||atMods){
+    stEl.textContent=atFx?'max effects reached ('+MAX_FX+')':atHeavy?'max heavy reached ('+MAX_HEAVY+')':'max modulators reached ('+MAX_MODS+')';
     clearTimeout(setStatus._t);
     setStatus._cap=true;
   } else {
     setStatus._cap=false;
-    if(heavy===1) stEl.textContent='1 heavy active';
-    else stEl.textContent='ready';
+    stEl.textContent=heavy>0?heavy+' heavy active':'ready';
   }
 }
 
@@ -6509,10 +6522,11 @@ let _modSeq=0;
 // fx-key lookup by element id — module ids from bank restore contain '.', which breaks a css selector
 function _fxKeysOf(elId){const el=document.getElementById(elId);return el?el.querySelectorAll('.fx-key'):[];}
 function addModule(name,type,color){
-  const total=state.modules.length;
-  const heavy=getHeavyCount();
-  if(total>=MAX_TOTAL) return;
-  if(HEAVY_MODULES.has(name)&&heavy>=MAX_HEAVY) return;
+  if(type==='modulator'){ if(getModCount()>=MAX_MODS) return; }
+  else{
+    if(getFxCount()>=MAX_FX) return;
+    if(HEAVY_MODULES.has(name)&&getHeavyCount()>=MAX_HEAVY) return;
+  }
 
   // monotonic counter: 'm'+Date.now() collided when two modules were added in the same ms
   const id='mod'+(++_modSeq);
@@ -9436,6 +9450,7 @@ rebuildSlots=function(){if(_bankSwitching)return;_origRebuild();autoSave();};
 </div>
 
 <!-- TUTORIAL -->
+<div id="tut-dim" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg"><path id="tut-dim-path" d=""/><g id="tut-dim-rings"></g></svg></div>
 <div id="tut-card" class="inverse">
   <div class="tc-tabs" id="tc-tabs" role="tablist" aria-label="tutorial chapters">
     <button type="button" class="tc-tab" id="tc-tab-1" data-ch="1" role="tab" aria-selected="false"><span>chapter 1: intro</span></button>
@@ -10562,10 +10577,10 @@ const TUT_STEPS=[
   // ch3 slide 7: build to 5
   {
     id:'the-chain-supports', _chapter:3, _chapterLabel:'effects',
-    text:"the chain supports up to 5 effects.",
-    action:"some are marked HEAVY. they cost more to run. the FPS counter is in the bottom bar. if it drops below 15, remove a heavy effect and watch it recover.\n\nstack effects until you hit 5.",
-    confirm:"picking which 5 effects is now a mini game.",
-    complete:()=>state._tutFpsWarning||state.modules.length>=5,
+    text:"the chain holds up to 10 effects.",
+    action:"modulators don't count toward that. some effects are marked HEAVY: they cost more to run, so you get 3 of those. the FPS counter is in the bottom bar. if it drops below 15, remove a heavy effect and watch it recover.\n\nstack 5 effects.",
+    confirm:"keep stacking if you want. picking which heavy 3 is the mini game now.",
+    complete:()=>state._tutFpsWarning||getFxCount()>=5,
     illus:`<svg width="220" height="80" viewBox="0 0 220 80" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
       <rect x="2" y="2" width="140" height="12" class="tut-pop" style="--del:0s;--dur:0.15s" fill="var(--ink)"/>
       <text x="6" y="11" class="tut-rise" style="--del:0.05s" font-family="monospace" font-size="7" fill="var(--paper)">COLOR</text>
@@ -11131,7 +11146,7 @@ function startTutorial(){
   if(document.body.classList.contains('tv')){setStatus('tutorial needs the desktop layout — switch back to hd first');return;}
   // already running: just bring the card back (a second start orphaned the
   // 400ms check interval and stacked listeners)
-  if(_ta){const tc=document.getElementById('tut-card');if(tc)tc.style.display='block';return;}
+  if(_ta){const tc=document.getElementById('tut-card');if(tc)tc.style.display='block';_tutLayout(true);return;}
   // if already completed, enter review mode — all steps are freely skippable
   try{_tutReviewMode=!!localStorage.getItem('morph_tut_done');}catch(e){_tutReviewMode=false;}
   // resume where left off if in progress, otherwise start fresh
@@ -11147,19 +11162,7 @@ function startTutorial(){
   const tutCard=document.getElementById('tut-card');
   tutCard.style.display='block';
   _showTS(_ts);
-  requestAnimationFrame(()=>{requestAnimationFrame(()=>{
-    const centerArea=document.querySelector('.center');
-    if(centerArea){
-      const appZoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1;
-      const cardZoom=parseFloat(getComputedStyle(tutCard).zoom)||1;
-      const totalZoom=appZoom*cardZoom;
-      const r=centerArea.getBoundingClientRect();
-      const cx=(r.left+r.right)/2/totalZoom;
-      tutCard.style.transform='none';
-      tutCard.style.left=(cx-tutCard.offsetWidth/2)+'px';
-      tutCard.style.top=(r.top/totalZoom)+'px';
-    }
-  });});
+  _tutWatch(true);
   clearInterval(_tp);
   _tp=setInterval(_checkTS,400);
   // low-fps watch only while the tutorial runs (it used to poll from page load)
@@ -11181,6 +11184,7 @@ function startTutorial(){
 function _tutStop(){
   _ta=false;
   document.getElementById('tut-card').style.display='none';
+  _tutWatch(false);
   const sm=document.getElementById('skip-modal');if(sm)sm.style.display='none';
   clearInterval(_tp);_tp=null;
   clearInterval(_tutFpsIv);_tutFpsIv=null;
@@ -11274,6 +11278,7 @@ function _prevTS(){
 }
 
 function _checkTS(){
+  if(_ta) _tutLayout(false);
   if(!_ta||_tsReady)return;
   const s=TUT_STEPS[_ts];
   if(!s)return;
@@ -11470,6 +11475,184 @@ function _showTS(i){
     if(exploreBtn) exploreBtn.style.display='none';
     if(skipBtn){skipBtn.textContent='skip tutorial';skipBtn.style.display='block';skipBtn.style.marginLeft='auto';}
   }
+  _tutFocusStep(s);
+}
+
+/* ── TUTORIAL SPOTLIGHT ──
+   Each step names the parts of the UI it talks about. Everything else is
+   dimmed, and the card is placed next to the focus without covering it.
+   A string selector gives one hole per matched element; {u:'sel'} unions all
+   matches into one hole (a list section). Steps without an entry dim the
+   whole app and centre the card. */
+const TUT_FOCUS={
+  'three-things-to':['#left-sources','.right','.bot-l'],
+  'first-give-it':['#left-sources','#source-nodes'],
+  'input-a-is':['#left-sources','#src-node-a'],
+  'now-fill-input':['#left-sources','#src-node-b'],
+  'every-source-comes':['#src-a-controls','#src-b-controls'],
+  'sources-are-swappable':['#src-replace-b','#left-sources'],
+  'loaded-them-in':['#left-previews'],
+  'the-right-panel':['.right'],
+  'lets-start-with':[{u:'#proc-sec-lbl, #glitch-sec-lbl, .mod-list .mitem:not([data-mod])'},'#mod-slots .node'],
+  'every-effect-has':['#mod-slots .node'],
+  'the-eye-icon':['#mod-slots .bypass-btn','#mod-slots .node-thumb'],
+  'modulators-are-different':[{u:'#mod-sec-lbl, .mod-list [data-mod]'}],
+  'modulators-drive-other':[{u:'#mod-sec-lbl, .mod-list [data-mod]'},'#mod-slots .node'],
+  'the-chain-supports':['.right','#mod-slots','#fps-big'],
+  'order-changes-everything':['#mod-slots .node-head'],
+  'the-crossfader-is':['.mixer-node','.mxf-wrap'],
+  'a-quick-orientation':['.master-node','.bot-l','#btn-pip','#btn-out'],
+  'your-audience-sees':['#btn-out'],
+  'capture-saves-your':['#capture-open-btn'],
+  'two-switches-in':['#btn-theme','#btn-crt'],
+  'hover-over-anything':['#helper'],
+  'thats-everything':['#btn-tutorial'],
+};
+const TUT_PAD=6, TUT_GAP=14, TUT_EDGE=8, TUT_ZOOMS=[1.5,1.35,1.2,1.05,0.95,0.85,0.75];
+
+function _tutVisible(el){
+  if(!el.getClientRects().length) return false;
+  const cs=getComputedStyle(el);
+  return cs.visibility!=='hidden'&&cs.display!=='none';
+}
+// element rect clipped by every scrolling/clipping ancestor and the viewport
+function _tutClipRect(el){
+  const r=el.getBoundingClientRect();
+  let x0=r.left,y0=r.top,x1=r.right,y1=r.bottom;
+  for(let p=el.parentElement;p&&p!==document.body;p=p.parentElement){
+    const cs=getComputedStyle(p);
+    if(cs.overflowX!=='visible'||cs.overflowY!=='visible'){
+      const q=p.getBoundingClientRect();
+      x0=Math.max(x0,q.left);y0=Math.max(y0,q.top);x1=Math.min(x1,q.right);y1=Math.min(y1,q.bottom);
+    }
+  }
+  x0=Math.max(x0,0);y0=Math.max(y0,0);x1=Math.min(x1,innerWidth);y1=Math.min(y1,innerHeight);
+  return x1-x0>2&&y1-y0>2?{x0,y0,x1,y1}:null;
+}
+function _tutFocusRects(step){
+  const out=[];
+  (TUT_FOCUS[step&&step.id]||[]).forEach(f=>{
+    const union=typeof f==='object';
+    const els=[...document.querySelectorAll(union?f.u:f)].filter(_tutVisible);
+    const rs=els.map(_tutClipRect).filter(Boolean);
+    if(!rs.length) return;
+    const pad=r=>({x0:Math.max(0,r.x0-TUT_PAD),y0:Math.max(0,r.y0-TUT_PAD),x1:Math.min(innerWidth,r.x1+TUT_PAD),y1:Math.min(innerHeight,r.y1+TUT_PAD)});
+    if(union) out.push(pad(rs.reduce((a,r)=>({x0:Math.min(a.x0,r.x0),y0:Math.min(a.y0,r.y0),x1:Math.max(a.x1,r.x1),y1:Math.max(a.y1,r.y1)}))));
+    else rs.forEach(r=>out.push(pad(r)));
+  });
+  return out;
+}
+function _tutDrawDim(rects){
+  const w=innerWidth,h=innerHeight;
+  let d=`M0 0H${w}V${h}H0Z`;
+  let rings='';
+  rects.forEach(r=>{
+    const x=Math.round(r.x0),y=Math.round(r.y0),rw=Math.round(r.x1-r.x0),rh=Math.round(r.y1-r.y0);
+    d+=`M${x} ${y}h${rw}v${rh}h${-rw}Z`;
+    rings+=`<rect x="${x+1}" y="${y+1}" width="${rw-2}" height="${rh-2}"/>`;
+  });
+  const svg=document.querySelector('#tut-dim svg');
+  svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
+  document.getElementById('tut-dim-path').setAttribute('d',d);
+  document.getElementById('tut-dim-rings').innerHTML=rings;
+}
+const _tutHit=(a,rects,gap)=>rects.some(r=>a.x0<r.x1+gap&&a.x1>r.x0-gap&&a.y0<r.y1+gap&&a.y1>r.y0-gap);
+const _tutInView=a=>a.x0>=TUT_EDGE-1&&a.y0>=TUT_EDGE-1&&a.x1<=innerWidth-TUT_EDGE+1&&a.y1<=innerHeight-TUT_EDGE+1;
+// best card position (in viewport px) for card size W×H: free of every focus
+// rect, as close to the focus as possible
+function _tutBestSpot(W,H,rects,allowOverlap){
+  const vw=innerWidth,vh=innerHeight;
+  if(W>vw-2*TUT_EDGE||H>vh-2*TUT_EDGE) return null;
+  if(!rects.length) return {x:(vw-W)/2,y:(vh-H)/2};
+  const U=rects.reduce((a,r)=>({x0:Math.min(a.x0,r.x0),y0:Math.min(a.y0,r.y0),x1:Math.max(a.x1,r.x1),y1:Math.max(a.y1,r.y1)}));
+  const ucx=(U.x0+U.x1)/2,ucy=(U.y0+U.y1)/2;
+  let best=null,bestScore=Infinity;
+  const step=12,xs=[],ys=[];
+  for(let x=TUT_EDGE;x<=vw-W-TUT_EDGE;x+=step) xs.push(x);
+  for(let y=TUT_EDGE;y<=vh-H-TUT_EDGE;y+=step) ys.push(y);
+  xs.push(vw-W-TUT_EDGE);ys.push(vh-H-TUT_EDGE);
+  // also try flush against each focus rect's edges
+  rects.forEach(r=>{xs.push(r.x1+TUT_GAP,r.x0-TUT_GAP-W);ys.push(r.y1+TUT_GAP,r.y0-TUT_GAP-H);});
+  for(const x of xs){
+    if(x<TUT_EDGE||x>vw-W-TUT_EDGE) continue;
+    for(const y of ys){
+      if(y<TUT_EDGE||y>vh-H-TUT_EDGE) continue;
+      const a={x0:x,y0:y,x1:x+W,y1:y+H};
+      let over=0;
+      if(_tutHit(a,rects,TUT_GAP)){
+        if(!allowOverlap) continue;
+        rects.forEach(r=>{over+=Math.max(0,Math.min(a.x1,r.x1+TUT_GAP)-Math.max(a.x0,r.x0-TUT_GAP))*Math.max(0,Math.min(a.y1,r.y1+TUT_GAP)-Math.max(a.y0,r.y0-TUT_GAP));});
+      }
+      // edge gap to the focus union, centre distance as a tie-break
+      const gx=Math.max(0,U.x0-a.x1,a.x0-U.x1),gy=Math.max(0,U.y0-a.y1,a.y0-U.y1);
+      const score=over*1000+Math.hypot(gx,gy)+0.05*Math.hypot(x+W/2-ucx,y+H/2-ucy);
+      if(score<bestScore){bestScore=score;best={x,y};}
+    }
+  }
+  return best;
+}
+function _tutPlaceCard(card,x,y,z){
+  const appZoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1;
+  card.style.zoom=z;
+  card.style.transform='none';card.style.bottom='auto';
+  card.style.left=(x/(appZoom*z))+'px';
+  card.style.top=(y/(appZoom*z))+'px';
+}
+// force: new step / resize — re-place the card from scratch. otherwise the card
+// only moves when it now overlaps the focus or falls off screen (content grew)
+function _tutLayout(force){
+  const card=document.getElementById('tut-card'),dim=document.getElementById('tut-dim');
+  if(!_ta||!card||card.style.display==='none'){if(dim)dim.style.display='none';return;}
+  const step=TUT_STEPS[_ts];
+  const rects=_tutFocusRects(step);
+  dim.style.display='block';
+  _tutDrawDim(rects);
+  const cr=card.getBoundingClientRect();
+  const cur={x0:cr.left,y0:cr.top,x1:cr.right,y1:cr.bottom};
+  if(card._tutManual&&!force) return;
+  if(!force&&!_tutHit(cur,rects,TUT_GAP-2)&&_tutInView(cur)) return;
+  const z0=parseFloat(card.style.zoom)||parseFloat(getComputedStyle(card).zoom)||1.5;
+  const bw=cr.width/z0,bh=cr.height/z0;   // card size at zoom 1
+  let pick=null;
+  for(const z of TUT_ZOOMS){
+    const spot=_tutBestSpot(bw*z,bh*z,rects);
+    if(spot){pick={...spot,z};break;}
+  }
+  if(!pick){
+    // nothing fits clear of the focus (small screens): smallest card, placed
+    // where it covers the least of it
+    const z=TUT_ZOOMS[TUT_ZOOMS.length-1];
+    const spot=_tutBestSpot(bw*z,bh*z,rects,true);
+    pick=spot?{...spot,z}:{x:Math.max(TUT_EDGE,innerWidth-bw*z-TUT_EDGE),y:TUT_EDGE,z};
+  }
+  _tutPlaceCard(card,pick.x,pick.y,pick.z);
+}
+function _tutFocusStep(step){
+  const card=document.getElementById('tut-card');
+  if(card) card._tutManual=false;
+  // scroll the first focus target that's scrolled out of view (chain nodes) in
+  for(const f of TUT_FOCUS[step&&step.id]||[]){
+    const el=[...document.querySelectorAll(typeof f==='object'?f.u:f)].find(_tutVisible);
+    if(el&&!_tutClipRect(el)){el.scrollIntoView({block:'nearest',behavior:'smooth'});break;}
+  }
+  requestAnimationFrame(()=>_tutLayout(true));
+}
+let _tutRaf=0;
+function _tutOnViewChange(e){
+  if(_tutRaf) return;
+  _tutRaf=requestAnimationFrame(()=>{_tutRaf=0;_tutLayout(e&&e.type==='resize');});
+}
+let _tutRO=null;
+function _tutWatch(on){
+  window.removeEventListener('resize',_tutOnViewChange);
+  window.removeEventListener('scroll',_tutOnViewChange,true);
+  if(_tutRO){_tutRO.disconnect();_tutRO=null;}
+  const dim=document.getElementById('tut-dim');
+  if(!on){if(dim)dim.style.display='none';return;}
+  window.addEventListener('resize',_tutOnViewChange);
+  window.addEventListener('scroll',_tutOnViewChange,true);
+  // the card grows when the confirm line / buttons appear
+  if(window.ResizeObserver){_tutRO=new ResizeObserver(()=>_tutOnViewChange());_tutRO.observe(document.getElementById('tut-card'));}
 }
 
 function _makeDraggable(el){
@@ -11488,7 +11671,7 @@ function _makeDraggable(el){
     el.style.transform='none';el.style.bottom='auto';
     el.style.left=ox+'px';el.style.top=oy+'px';
     sx=e.clientX/totalZoom;sy=e.clientY/totalZoom;
-    drag=true;el.style.cursor='grabbing';
+    drag=true;el.style.cursor='grabbing';el._tutManual=true;
     e.preventDefault();
   });
   document.addEventListener('mousemove',e=>{
