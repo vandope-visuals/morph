@@ -6045,17 +6045,13 @@ function removeModule(id){
   // array alone leaks offscreens, feedback buffers and datamosh state
   const mod=state.modules.find(m=>m.id===id);
   if(mod){
-    if(mod.offscreen){mod.offscreen.width=mod.offscreen.height=1;}
-    mod.offscreen=null; mod.offCtx=null;
-    if(mod.fbPrev){mod.fbPrev.width=mod.fbPrev.height=1;}
-    mod.fbPrev=null;
-    if(mod._tmpB){mod._tmpB.width=mod._tmpB.height=1;}
-    mod._tmpB=null; mod._tmpBCtx=null;
-    if(mod.geomOffscreen){mod.geomOffscreen.width=mod.geomOffscreen.height=1;}
-    mod.geomOffscreen=null; mod.geomCtx=null;
-    if(mod.geomOffscreen2){mod.geomOffscreen2.width=mod.geomOffscreen2.height=1;}
-    mod.geomOffscreen2=null; mod.geomCtx2=null;
-    mod.dmosh=null; mod._cfbBuf=null; mod._lastResult=null;
+    // canvases: shrink before dropping so the backing store is freed promptly
+    ['offscreen','fbPrev','_tmpB','geomOffscreen','geomOffscreen2','_asciiSmp','_asciiCv'].forEach(k=>{if(mod[k]){mod[k].width=mod[k].height=1;}mod[k]=null;});
+    ['offCtx','fbPrevCtx','_tmpBCtx','geomCtx','geomCtx2','_asciiSmpCtx','_asciiCvCtx',
+     'dmosh','_cfbBuf','_lastResult','_scratch','_row','_ps','_freezeBlocks','_asciiImg','_asciiAtlas','_rowSeeds','_hist','pn','cv'
+    ].forEach(k=>{mod[k]=null;});
+    // routing dropdowns are appended to <body>, outside the module node
+    ['lfo-','xy-x-','xy-y-'].forEach(pf=>{const dd=document.getElementById('csel-dd-'+pf+id);if(dd)dd.remove();});
   }
   state.modules=state.modules.filter(m=>m.id!==id);
   // last audio module gone: stop the mic and close the context now (tickAudio also catches bank switches)
