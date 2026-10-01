@@ -5399,6 +5399,11 @@ function assignLfoCustom(modId){
 
 /* ── GLITCH MODULES ── */
 
+// one-row scratch (all VHS remaps read only within the current row); re-sized with the resolution
+function _rowScratch(mod){const n=W*4;if(!mod._row||mod._row.length!==n)mod._row=new Uint8ClampedArray(n);return mod._row;}
+// geometric skip to the next pixel hit with probability pr: same distribution as one Math.random()
+// per pixel, ~pr as many calls
+function _geoSkip(lq){return 1+Math.floor(Math.log(1-Math.random())/lq);}
 function processVhsModule(mod,srcCanvas){
   if(GLProcessor.ready()){
     const GL_VHS={0:'vhs_colorbleed',1:'vhs_lumawobble',2:'vhs_chromashift',3:'vhs_headswitch',4:'vhs_tracking'};
@@ -5408,11 +5413,13 @@ function processVhsModule(mod,srcCanvas){
       if(r) return r;
     }
   }
+  if(_shouldSkipHeavy(mod)) return mod._lastResult;
   if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
   const ctx=mod.offCtx; const t=mod.intensity; const p=mod.param; const fx=mod.activeFx;
   ctx.drawImage(srcCanvas,0,0,W,H);
   const imgData=ctx.getImageData(0,0,W,H); const d=imgData.data;
   const time=performance.now()*0.001;
+  const row=_rowScratch(mod),rw=W*4;
 
   // tracking tears (fx4, fx7)
   if(fx===4||fx===7){
@@ -5421,10 +5428,10 @@ function processVhsModule(mod,srcCanvas){
       const y=Math.floor(Math.random()*H);
       const shift=Math.floor((Math.random()-0.5)*40*t);
       const height=Math.floor(Math.random()*6)+1;
-      for(let row=y;row<Math.min(y+height,H);row++){
+      for(let r=y;r<Math.min(y+height,H);r++){
         for(let x=0;x<W;x++){
           const srcX=((x+shift)%W+W)%W;
-          const si=(row*W+srcX)*4; const di=(row*W+x)*4;
+          const si=(r*W+srcX)*4; const di=(r*W+x)*4;
           d[di]=d[si];d[di+1]=d[si+1];d[di+2]=d[si+2];
         }
       }
@@ -5433,12 +5440,13 @@ function processVhsModule(mod,srcCanvas){
 
   // color bleed (fx0, fx7)
   if(fx===0||fx===7){
-    const bleed=Math.floor(p*20*t)+1;
-    const tmp=new Uint8ClampedArray(d);
-    for(let i=0;i<d.length;i+=4){
-      const x=Math.floor(i/4)%W;
-      if(x+bleed<W) d[i]=tmp[i+bleed*4];
-      if(x-bleed>=0) d[i+2]=tmp[i-bleed*4+2];
+    const bleed=Math.floor(p*20*t)+1,b4=bleed*4;
+    for(let y=0;y<H;y++){
+      const o=y*rw; row.set(d.subarray(o,o+rw));
+      for(let x=0,j=0;x<W;x++,j+=4){
+        if(x+bleed<W) d[o+j]=row[j+b4];
+        if(x-bleed>=0) d[o+j+2]=row[j-b4+2];
+      }
     }
   }
 
@@ -5447,25 +5455,25 @@ function processVhsModule(mod,srcCanvas){
     const amp=p*0.4*t;
     for(let y=0;y<H;y++){
       const wobble=1+(Math.sin(y*0.15+time*4)*amp);
-      for(let x=0;x<W;x++){
-        const i=(y*W+x)*4;
-        d[i]=Math.min(255,d[i]*wobble);
-        d[i+1]=Math.min(255,d[i+1]*wobble);
-        d[i+2]=Math.min(255,d[i+2]*wobble);
+      for(let i=y*rw,e=i+rw;i<e;i+=4){
+        d[i]=d[i]*wobble;
+        d[i+1]=d[i+1]*wobble;
+        d[i+2]=d[i+2]*wobble;
       }
     }
   }
 
   // tape crinkle (fx6, fx7)
   if(fx===6||fx===7){
-    const tmp=new Uint8ClampedArray(d);
     for(let y=0;y<H;y++){
       const crinkle=Math.sin(y*0.3+time*2)*p*8*t;
       const compress=1+Math.sin(y*0.05+time)*p*0.15*t;
+      const o=y*rw; row.set(d.subarray(o,o+rw));
       for(let x=0;x<W;x++){
-        const srcX=Math.floor(((x*compress+crinkle)%W+W)%W);
-        const di=(y*W+x)*4; const si=(y*W+srcX)*4;
-        d[di]=tmp[si];d[di+1]=tmp[si+1];d[di+2]=tmp[si+2];
+        // v stays in (-W,2W): one wrap is exact and replaces two % per pixel
+        let v=x*compress+crinkle; if(v<0)v+=W; else if(v>=W)v-=W;
+        const di=o+x*4,si=(v|0)*4;
+        d[di]=row[si];d[di+1]=row[si+1];d[di+2]=row[si+2];
       }
     }
   }
@@ -5473,22 +5481,23 @@ function processVhsModule(mod,srcCanvas){
   // chroma shift (fx2, fx7)
   if(fx===2||fx===7){
     const shift=Math.floor(p*30*t)+1;
-    const tmp=new Uint8ClampedArray(d);
-    for(let i=0;i<d.length;i+=4){
-      const x=Math.floor(i/4)%W;
-      const y=Math.floor(i/4/W);
-      const rSrcX=Math.min(W-1,x+shift);
-      const bSrcX=Math.max(0,x-shift);
-      d[i]  =tmp[(y*W+rSrcX)*4];
-      d[i+2]=tmp[(y*W+bSrcX)*4+2];
+    for(let y=0;y<H;y++){
+      const o=y*rw; row.set(d.subarray(o,o+rw));
+      for(let x=0;x<W;x++){
+        const rSrcX=x+shift<W?x+shift:W-1;
+        const bSrcX=x-shift>0?x-shift:0;
+        d[o+x*4]=row[rSrcX*4];
+        d[o+x*4+2]=row[bSrcX*4+2];
+      }
     }
   }
 
   // static burst (fx5, fx7)
   if(fx===5||fx===7){
     const density=p*0.04*t;
-    for(let i=0;i<d.length;i+=4){
-      if(Math.random()<density){const v=Math.random()<0.5?0:255;d[i]=d[i+1]=d[i+2]=v;}
+    if(density>0){
+      const lq=Math.log(1-density),n=W*H;
+      for(let k=_geoSkip(lq)-1;k<n;k+=_geoSkip(lq)){const i=k*4,v=Math.random()<0.5?0:255;d[i]=d[i+1]=d[i+2]=v;}
     }
   }
 
@@ -5510,6 +5519,7 @@ function processVhsModule(mod,srcCanvas){
   }
 
   ctx.putImageData(imgData,0,0);
+  mod._lastResult=mod.offscreen;
   return mod.offscreen;
 }
 
