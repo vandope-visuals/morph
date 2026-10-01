@@ -4755,111 +4755,99 @@ const BRAILLE='⣿⣷⣦⣄⡀ ';
 const BLOCK_CHARS='█▓▒░ ';
 const MATRIX_CHARS='アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEF';
 
+// ascii renders without per-cell canvas calls: every shape (glyph, disc, cross, bar) is rasterised once by
+// the canvas in white into a cached alpha mask, then composited per cell in colour into an ImageData.
+// cells are sampled from a nearest-neighbour downscale of the frame (one pixel per cell, at its centre).
+// was up to ~25k fillText/arc/fillRect calls with a fresh fillStyle string each (17ms in mode 'lines').
+const _asciiTileCv=document.createElement('canvas');_asciiTileCv.width=_asciiTileCv.height=128;
+const _asciiTileCtx=_asciiTileCv.getContext('2d',{willReadFrequently:true});
+// draw(ctx,pad) paints a white shape anchored at (pad,pad); returns its alpha mask + bbox relative to the anchor
+function _asciiMask(draw,pad){
+  const c=_asciiTileCtx;
+  c.setTransform(1,0,0,1,0,0);c.globalAlpha=1;c.clearRect(0,0,128,128);c.fillStyle='#fff';c.textBaseline='top';
+  draw(c,pad);
+  const d=c.getImageData(0,0,128,128).data;
+  let x0=128,y0=128,x1=-1,y1=-1;
+  for(let y=0;y<128;y++)for(let x=0;x<128;x++)if(d[(y*128+x)*4+3]){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;}
+  if(x1<0) return null;
+  const w=x1-x0+1,h=y1-y0+1,a=new Uint8Array(w*h);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++)a[y*w+x]=d[((y0+y)*128+x0+x)*4+3];
+  return {ox:x0-pad,oy:y0-pad,w,h,a};
+}
+// source-over a white mask tinted (r,g,b) onto opaque rgba buf at anchor (ax,ay)
+function _asciiBlend(o,e,ax,ay,r,g,b){
+  const a=e.a,ew=e.w,bx=ax+e.ox,by=ay+e.oy;
+  for(let yy=0,k=0;yy<e.h;yy++){
+    const y=by+yy; if(y<0||y>=H){k+=ew;continue;}
+    for(let xx=0,i=(y*W+bx)*4;xx<ew;xx++,k++,i+=4){
+      const al=a[k]; if(!al) continue;
+      const x=bx+xx; if(x<0||x>=W) continue;
+      if(al===255){o[i]=r;o[i+1]=g;o[i+2]=b;}
+      else{const f=al/255;o[i]=o[i]+(r-o[i])*f;o[i+1]=o[i+1]+(g-o[i+1])*f;o[i+2]=o[i+2]+(b-o[i+2])*f;}
+    }
+  }
+}
+const _ASCII_SETS={ascii:[...ASCII_CHARS],braille:[...BRAILLE],matrix:[...MATRIX_CHARS],symbols:[...BLOCK_CHARS],binary:['0','1']};
 function processAsciiModule(mod,srcCanvas){
-  if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d',{willReadFrequently:true});}
-  mod.offCtx.drawImage(srcCanvas,0,0,W,H);
+  if(_shouldSkipHeavy(mod)) return mod._lastResult;
+  if(!mod.offscreen){mod.offscreen=document.createElement('canvas');mod.offscreen.width=W;mod.offscreen.height=H;mod.offCtx=mod.offscreen.getContext('2d');}
   const fx=ASCII_FX[mod.activeFx];
-  if(!fx) return mod.offscreen||srcCanvas;
-  const cellSize=Math.max(4,Math.round(4+mod.param*28));
-  const cols=Math.floor(W/cellSize),rows=Math.floor(H/cellSize);
-  const src=mod.offCtx.getImageData(0,0,W,H);
-  const d=src.data;
-  const ctx=mod.offCtx;
-
-  switch(fx.id){
-    case 'ascii':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`bold ${cellSize}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const ci=Math.floor((1-lum)*(ASCII_CHARS.length-1));
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(ASCII_CHARS[ci],col*cellSize,row*cellSize);
-      } break;}
-
-    case 'braille':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`${cellSize}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const ci=Math.floor((1-lum)*(BRAILLE.length-1));
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(BRAILLE[ci],col*cellSize,row*cellSize);
-      } break;}
-
-    case 'binary':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`bold ${Math.max(6,cellSize-2)}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(lum>0.5?'1':'0',col*cellSize,row*cellSize);
-      } break;}
-
-    case 'matrix':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`${cellSize}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const ci=Math.floor((1-lum)*(MATRIX_CHARS.length-1));
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(MATRIX_CHARS[ci],col*cellSize,row*cellSize);
-      } break;}
-
-    case 'symbols':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      ctx.font=`${cellSize}px monospace`;ctx.textBaseline='top';
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const ci=Math.floor((1-lum)*(BLOCK_CHARS.length-1));
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillText(BLOCK_CHARS[ci],col*cellSize,row*cellSize);
-      } break;}
-
-    case 'halftone':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const r=lum*cellSize*0.52;
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.beginPath();ctx.arc(col*cellSize+cellSize/2,row*cellSize+cellSize/2,r,0,Math.PI*2);ctx.fill();
-      } break;}
-
-    case 'lines':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      const gap=Math.max(2,cellSize);
-      for(let y=0;y<H;y+=gap)for(let x=0;x<W;x++){
-        const px=(y*W+x)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const lh=Math.round(lum*gap*0.9)+1;
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillRect(x,y+(gap-lh)/2,1,lh);
-      } break;}
-
-    case 'crosses':{
-      ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
-      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
-        const px=(row*cellSize*W+col*cellSize)*4;
-        const lum=(d[px]*0.299+d[px+1]*0.587+d[px+2]*0.114)/255;
-        const s=Math.round(lum*cellSize*0.9)+1;
-        const cx2=col*cellSize+cellSize/2,cy2=row*cellSize+cellSize/2;
-        ctx.fillStyle=`rgb(${d[px]},${d[px+1]},${d[px+2]})`;
-        ctx.fillRect(cx2-s/2,cy2-1,s,2);
-        ctx.fillRect(cx2-1,cy2-s/2,2,s);
-      } break;}
+  if(!fx){mod.offCtx.drawImage(srcCanvas,0,0,W,H);return mod.offscreen;}
+  const id=fx.id,cs=Math.max(4,Math.round(4+mod.param*28));
+  const lines=id==='lines',gap=Math.max(2,cs);
+  const cols=lines?W:Math.floor(W/cs),rows=lines?Math.ceil(H/gap):Math.floor(H/cs);
+  // one sample per cell (lines: per pixel of every gap-th row)
+  let sc=mod._asciiSmp;
+  if(!sc){sc=mod._asciiSmp=document.createElement('canvas');mod._asciiSmpCtx=sc.getContext('2d',{willReadFrequently:true});}
+  if(sc.width!==cols||sc.height!==rows){sc.width=cols;sc.height=rows;}
+  const sctx=mod._asciiSmpCtx;sctx.imageSmoothingEnabled=false;
+  if(lines){
+    const full=Math.floor(H/gap);
+    if(full) sctx.drawImage(srcCanvas,0,0,W,full*gap,0,0,W,full);
+    if(full<rows) sctx.drawImage(srcCanvas,0,full*gap,W,1,0,full,W,1);
+  } else sctx.drawImage(srcCanvas,0,0,cols*cs,rows*cs,0,0,cols,rows);
+  const s=sctx.getImageData(0,0,cols,rows).data;
+  // shape masks, cached per mode + cell size
+  const akey=id+'|'+cs;
+  let at=mod._asciiAtlas;
+  if(!at||at.key!==akey) at=mod._asciiAtlas={key:akey,e:[]};
+  const E=at.e;
+  // output frame: opaque black, shapes composited in draw order
+  let img=mod._asciiImg;
+  if(!img||img.width!==W||img.height!==H) img=mod._asciiImg=new ImageData(W,H);
+  const o=img.data;new Uint32Array(o.buffer).fill(0xff000000);
+  const chars=_ASCII_SETS[id];
+  const font=id==='ascii'?`bold ${cs}px monospace`:id==='binary'?`bold ${Math.max(6,cs-2)}px monospace`:`${cs}px monospace`;
+  for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
+    const si=(row*cols+col)*4,r=s[si],g=s[si+1],b=s[si+2];
+    const lum=(r*0.299+g*0.587+b*0.114)/255;
+    let k,ax=col*cs,ay=row*cs;
+    if(chars) k=id==='binary'?(lum>0.5?1:0):Math.floor((1-lum)*(chars.length-1));
+    else if(id==='halftone') k=Math.round(lum*cs*0.52*8);
+    else if(id==='crosses') k=Math.round(lum*cs*0.9)+1;
+    else {k=Math.round(lum*gap*0.9)+1;ax=col;ay=row*gap;} // lines
+    let e=E[k];
+    if(e===undefined){
+      if(chars){const ch=chars[k];e=_asciiMask((c,pd)=>{c.font=font;c.fillText(ch,pd,pd);},32);}
+      else if(id==='halftone') e=k?_asciiMask((c,pd)=>{c.beginPath();c.arc(pd+cs/2,pd+cs/2,k/8,0,Math.PI*2);c.fill();},32):null;
+      else if(id==='crosses') e=_asciiMask((c,pd)=>{const m=pd+cs/2;c.fillRect(m-k/2,m-1,k,2);c.fillRect(m-1,m-k/2,2,k);},32);
+      else e=_asciiMask((c,pd)=>{c.fillRect(pd,pd+(gap-k)/2,1,k);},32);
+      E[k]=e;
+    }
+    if(e) _asciiBlend(o,e,ax,ay,r,g,b);
   }
-
-  if(mod.intensity<1){
-    const tmp=mod.offCtx.getImageData(0,0,W,H);
-    mod.offCtx.drawImage(srcCanvas,0,0,W,H);
-    mod.offCtx.globalAlpha=mod.intensity;mod.offCtx.putImageData(tmp,0,0);mod.offCtx.globalAlpha=1;
+  // intensity: draw the effect over the source (putImageData ignores globalAlpha, so the knob did nothing)
+  const t=mod.intensity,ctx=mod.offCtx;
+  if(t>=1) ctx.putImageData(img,0,0);
+  else{
+    let fc=mod._asciiCv;
+    if(!fc){fc=mod._asciiCv=document.createElement('canvas');mod._asciiCvCtx=fc.getContext('2d');}
+    if(fc.width!==W||fc.height!==H){fc.width=W;fc.height=H;}
+    mod._asciiCvCtx.putImageData(img,0,0);
+    ctx.drawImage(srcCanvas,0,0,W,H);
+    ctx.globalAlpha=t;ctx.drawImage(fc,0,0);ctx.globalAlpha=1;
   }
+  mod._lastResult=mod.offscreen;
   return mod.offscreen;
 }
 
