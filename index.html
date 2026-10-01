@@ -6345,6 +6345,8 @@ function removeModule(id){
   // array alone leaks offscreens, feedback buffers and datamosh state
   const mod=state.modules.find(m=>m.id===id);
   if(mod){
+    // GL textures / output canvas held by GLProcessor for this module
+    if(typeof GLProcessor!=='undefined'&&GLProcessor.release) GLProcessor.release(mod);
     // canvases: shrink before dropping so the backing store is freed promptly
     ['offscreen','fbPrev','_tmpB','geomOffscreen','geomOffscreen2','_asciiSmp','_asciiCv'].forEach(k=>{if(mod[k]){mod[k].width=mod[k].height=1;}mod[k]=null;});
     ['offCtx','fbPrevCtx','_tmpBCtx','geomCtx','geomCtx2','_asciiSmpCtx','_asciiCvCtx',
