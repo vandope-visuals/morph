@@ -1824,7 +1824,8 @@ function _applyResolution(w,h){
 }
 /* ── SOURCE SYSTEM ── */
 // Each source: {type, label, active, vidEl, vid2El, stream, color, offscreen, offCtx}
-const _defaultSlotFx=()=>({size:0.59,rotate:0.5,fade:1.0,mirrorH:false,mirrorV:false,rotAngle:0});
+// size: fader 0–1 maps to 0–200% scale, 0.5 = 100% (neutral)
+const _defaultSlotFx=()=>({size:0.5,rotate:0.5,fade:1.0,mirrorH:false,mirrorV:false,rotAngle:0});
 const sources={
   A:{type:null,label:'empty',active:false,vidEl:null,vid2El:null,stream:null,color:'#000000',offscreen:null,offCtx:null,slotFx:_defaultSlotFx()},
   B:{type:null,label:'empty',active:false,vidEl:null,vid2El:null,stream:null,color:'#000000',offscreen:null,offCtx:null,slotFx:_defaultSlotFx()}
@@ -1836,7 +1837,6 @@ let pickMode=null; // 'A' or 'B' when pick mode active
 /* ── IMAGE SOURCE: draw fit, slotFx handles transforms ── */
 function renderImageFx(src){
   if(!src.offscreen||!src._imgEl) return src.offscreen;
-  if(src.imgFx&&src.imgFx.r1!==undefined){if(!src.slotFx)src.slotFx=_defaultSlotFx();src.slotFx.size=src.imgFx.size||0.59;src.imgFx=null;}
   const ctx=src.offCtx,img=src._imgEl;
   const iw=img.naturalWidth||img.width||W,ih=img.naturalHeight||img.height||H;
   ctx.clearRect(0,0,W,H);const scale=Math.min(W/iw,H/ih);const dw=iw*scale,dh=ih*scale;
@@ -1848,8 +1848,10 @@ function applySlotFx(src){
   if(!src.offscreen||!src.slotFx) return;
   const fx=src.slotFx;
   const rotRate=((fx.rotate||0.5)-0.5)*2;
-  const sz=(fx.size!==undefined?fx.size:0.59)*2;
-  const needsTransform=Math.abs(rotRate)>0.04||Math.abs(sz-1.18)>0.02||fx.mirrorH||fx.mirrorV||(fx.fade!==undefined&&fx.fade<0.99);
+  // scale = fader×2 so the label (fader×200%) is the real zoom. the neutral
+  // point was 1.18 (untransformed at "118%", 1.22× one notch off it)
+  const sz=(fx.size!==undefined?fx.size:0.5)*2;
+  const needsTransform=Math.abs(rotRate)>0.04||Math.abs(sz-1)>0.005||fx.mirrorH||fx.mirrorV||(fx.fade!==undefined&&fx.fade<0.99);
   if(!needsTransform) return;
   if(Math.abs(rotRate)>0.04) fx.rotAngle=(fx.rotAngle||0)+rotRate*0.05*Math.PI;
   // temp canvas cached per source — was allocated fresh on every transformed
@@ -1901,23 +1903,37 @@ function renderTextSource(src){
   ctx.clearRect(0,0,W,H); // transparent bg — composites cleanly over other source
   const txt=(p.text||'').trim();
   if(!txt) return src.offscreen;
-  const font=TEXT_FONTS[p.fontIndex||0];
-  const lines=txt.split('\n');
-  let sz=Math.round(H*0.28);
-  ctx.textAlign='center';ctx.textBaseline='middle';
-  for(let i=0;i<30;i++){
-    ctx.font=sz+'px '+font.family;
-    const maxW=Math.max(...lines.map(l=>ctx.measureText(l||' ').width));
-    if(maxW<=W*0.9&&sz*lines.length*1.35<=H*0.9) break;
-    sz=Math.round(sz*0.85);if(sz<6) break;
+  // the fit loop (up to 30 measureText passes + allocations) ran every frame;
+  // lay out once per text/font/color/size (and per webfont load) and blit
+  const key=txt+'\u0000'+(p.fontIndex||0)+'|'+(p.color||'#ffffff')+'|'+W+'x'+H+'|'+_fontEpoch;
+  let base=src._txtCv;
+  if(!base||src._txtKey!==key){
+    if(!base){base=src._txtCv=document.createElement('canvas');}
+    base.width=W;base.height=H;
+    const bc=base.getContext('2d');
+    const font=TEXT_FONTS[p.fontIndex||0];
+    const lines=txt.split('\n');
+    let sz=Math.round(H*0.28);
+    bc.textAlign='center';bc.textBaseline='middle';
+    for(let i=0;i<30;i++){
+      bc.font=sz+'px '+font.family;
+      let maxW=0;for(const l of lines){const w=bc.measureText(l||' ').width;if(w>maxW)maxW=w;}
+      if(maxW<=W*0.9&&sz*lines.length*1.35<=H*0.9) break;
+      sz=Math.round(sz*0.85);if(sz<6) break;
+    }
+    bc.font=sz+'px '+font.family;
+    bc.fillStyle=p.color||'#ffffff';
+    const lineH=sz*1.35;
+    const startY=(H-lineH*lines.length)/2+lineH*0.5;
+    lines.forEach((line,i)=>bc.fillText(line,W/2,startY+i*lineH));
+    src._txtKey=key;
   }
-  ctx.font=sz+'px '+font.family;
-  ctx.fillStyle=p.color||'#ffffff';
-  const lineH=sz*1.35;
-  const startY=(H-lineH*lines.length)/2+lineH*0.5;
-  lines.forEach((line,i)=>ctx.fillText(line,W/2,startY+i*lineH));
+  ctx.drawImage(base,0,0);
   return src.offscreen;
 }
+// bumped whenever a webfont finishes loading so cached text re-lays out
+let _fontEpoch=0;
+try{document.fonts.addEventListener('loadingdone',()=>{_fontEpoch++;});}catch(e){}
 
 function getSourceCanvas(slot){
   const src=sources[slot];if(!src.active) return null;
@@ -1936,23 +1952,44 @@ function getSourceCanvas(slot){
     const vid=src.vidEl;if(!vid) return null;
     if(vid.readyState<2&&!vid.videoWidth) return null;
     if(src.type==='screen'&&vid.videoWidth>W){
-      if(!src._bitmapPending){src._bitmapPending=true;createImageBitmap(vid,{resizeWidth:W,resizeHeight:H,resizeQuality:'pixelated'}).then(bmp=>{ctx.drawImage(bmp,0,0,W,H);bmp.close();src._bitmapPending=false;}).catch(()=>{src._bitmapPending=false;});}
+      // downscale off-thread; the last finished bitmap is drawn every frame so
+      // applySlotFx always transforms a fresh frame (drawing only on resolve
+      // left pending frames re-transforming their own output: flip flicker,
+      // compounding fade/size)
+      if(src._bmpVid!==vid){if(src._bmp){src._bmp.close();src._bmp=null;}src._bmpVid=vid;}
+      if(!src._bitmapPending){
+        src._bitmapPending=true;
+        createImageBitmap(vid,{resizeWidth:W,resizeHeight:H,resizeQuality:'pixelated'}).then(bmp=>{
+          src._bitmapPending=false;
+          if(src.vidEl!==vid||src._bmpVid!==vid){bmp.close();return;}
+          if(src._bmp) src._bmp.close();
+          src._bmp=bmp;
+        }).catch(()=>{src._bitmapPending=false;});
+      }
+      ctx.clearRect(0,0,W,H);
+      if(!src._bmp) return src.offscreen;
+      ctx.drawImage(src._bmp,0,0,W,H);
       applySlotFx(src);return src.offscreen;
     }
-    try{
-      if((src.type==='file')&&src.vid2El&&vid.duration){
-        const remaining=vid.duration-vid.currentTime;
-        if(remaining<FADE_DUR&&src.vid2El.src&&src.vid2El.readyState>=2){ctx.globalAlpha=1;ctx.drawImage(src.vid2El,0,0,W,H);ctx.globalAlpha=remaining/FADE_DUR;ctx.drawImage(vid,0,0,W,H);ctx.globalAlpha=1;}
-        else{ctx.drawImage(vid,0,0,W,H);}
-        if(remaining<FADE_DUR+0.1&&remaining>FADE_DUR-0.1&&src.vid2El.src===vid.src&&src.vid2El.paused){src.vid2El.currentTime=0;src.vid2El.play().catch(()=>{});}
-      } else{ctx.drawImage(vid,0,0,W,H);}
-    }catch(e){
-      if(e.name==='SecurityError'){
-        console.warn('morph: canvas SecurityError on slot',slot,'— video may lack CORS headers',vid.src?.substring(0,80));
-        src.offscreen=null;src.offCtx=null;
-        return null;
+    // (no try/catch: drawing a cross-origin video taints silently rather than
+    // throwing — the SecurityError surfaces at getImageData in the modules,
+    // which renderFrame already handles)
+    const v2=src.vid2El;
+    if(src.type==='file'&&v2&&vid.duration&&isFinite(vid.duration)){
+      const fd=Math.min(FADE_DUR,vid.duration/4);
+      const remaining=vid.duration-vid.currentTime;
+      if(!src._xfading&&remaining<fd&&vid.currentTime>fd&&v2.paused&&!vid.paused){
+        src._xfading=true;
+        try{v2.currentTime=0;}catch(e){}
+        v2.playbackRate=vid.playbackRate;
+        v2.play().catch(()=>{});
       }
-    }
+      if(src._xfading&&v2.readyState>=2&&!v2.paused){
+        ctx.globalAlpha=1;ctx.drawImage(v2,0,0,W,H);
+        ctx.globalAlpha=Math.max(0,Math.min(1,remaining/fd));ctx.drawImage(vid,0,0,W,H);ctx.globalAlpha=1;
+        if(remaining<=0.04||vid.ended) _vidEndXfade(src);
+      } else ctx.drawImage(vid,0,0,W,H);
+    } else ctx.drawImage(vid,0,0,W,H);
     applySlotFx(src);return src.offscreen;
   }
   return null;
@@ -1975,8 +2012,6 @@ function updatePreview(slot){
   const labelEl=document.getElementById('src-'+s+'-label');
   const btn=document.getElementById('src-replace-'+s);
   if(src.active){
-    // confirm tutorial replace flag when source actually loads (not just at startPickMode)
-    if(state&&state._tutPendingReplaceSlot===slot){state._tutReplace=true;state._tutPendingReplaceSlot=null;}
     if(slotEl){slotEl.classList.add('loaded');slotEl.style.display='flex';}
     if(labelEl) labelEl.textContent=src.label;
     if(btn&&pickMode!==slot) btn.textContent='replace';
@@ -2172,11 +2207,13 @@ function pickSource(type){
 
 function swapSources(){
   // swap all logical properties but keep offscreen canvases in place (they're slot-specific)
-  const propsToSwap=['type','label','active','vidEl','vid2El','stream','color','genParam','genFrame','genState','_imgEl','imgFx','slotFx','webcamDeviceId','webcamDevices','textParams'];
+  const propsToSwap=['type','label','active','vidEl','vid2El','stream','color','genParam','genFrame','genState','_imgEl','imgFx','slotFx','webcamDeviceId','webcamDevices','textParams','_blobUrl','_xfading','_bmp','_bmpVid'];
   const tmpA={};
   propsToSwap.forEach(k=>{ tmpA[k]=sources.A[k]; });
   propsToSwap.forEach(k=>{ sources.A[k]=sources.B[k]; });
   propsToSwap.forEach(k=>{ sources.B[k]=tmpA[k]; });
+  // pending loads were aimed at the old slot contents — drop them
+  ++_loadTok.A;++_loadTok.B;
   // clear and re-render both offscreen canvases on next frame
   ['A','B'].forEach(slot=>{
     const src=sources[slot];
@@ -2196,21 +2233,60 @@ function swapSources(){
   setStatus('sources swapped');
 }
 
-function loadSourceType(slot,type){
-  const src=sources[slot];
-  // clear any error status lock from a previous failed load
-  setStatus._cap=false;
-  // clean up previous source
+// per-slot load token: every new pick bumps it, and async loads (file/image
+// decode, archive resolve, camera/screen permission) drop their result if it
+// changed meanwhile — a late resolution used to overwrite (and leak) a newer
+// source in the same slot
+const _loadTok={A:0,B:0};
+// new source is ready: only now release the old one. cleanup used to run
+// before the file dialog / permission prompt, so cancel or deny left the
+// slot black
+function _commitSource(slot){
+  // tutorial: a replace counts once the new source actually loads
+  if(state._tutPendingReplaceSlot===slot){state._tutReplace=true;state._tutPendingReplaceSlot=null;}
   cleanupSource(slot);
-  src.type=type;
   // reset all module offscreens — clears any canvas taint from previous source
   state.modules.forEach(mod=>{
     mod.offscreen=null;mod.offCtx=null;
     if(mod.dmosh) mod.dmosh={iFrame:null,iFrameCounter:0,dispBuf:null,flowBuf:null,flowRef:null,moshBuf:null};
   });
+}
+function _stopStream(stream){if(stream)stream.getTracks().forEach(t=>t.stop());}
+function _srcReady(slot,msg){
+  updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+  if(msg) setStatus(msg);
+}
+function _startWebcam(slot,deviceId,cams){
+  const src=sources[slot];
+  const tok=++_loadTok[slot];
+  const constraints={video:deviceId?{deviceId:{exact:deviceId}}:true,audio:false};
+  navigator.mediaDevices.getUserMedia(constraints).then(stream=>{
+    if(_loadTok[slot]!==tok){_stopStream(stream);return;}
+    _commitSource(slot);
+    const vid=makeVideoEl();
+    vid.srcObject=stream;vid.play().catch(()=>{});
+    src.type='webcam';src.vidEl=vid;src.stream=stream;
+    src.active=true;src.label='webcam';
+    src.webcamDeviceId=deviceId||null;
+    src.webcamDevices=cams||null;
+    if(!src.slotFx) src.slotFx=_defaultSlotFx();
+    _srcReady(slot,'webcam active on '+slot);
+  }).catch(e=>{if(_loadTok[slot]===tok){setStatus('webcam denied');updateSourcePickState();}});
+}
+
+function loadSourceType(slot,type){
+  const src=sources[slot];
+  const tok=++_loadTok[slot];
+  // clear any error status lock from a previous failed load
+  setStatus._cap=false;
+  // a pending camera picker belongs to the pick this one replaces
+  if(src.webcamPicker){src.webcamPicker=false;src.webcamStartCam=null;updateSrcNodeControls(slot);}
 
   if(type==='file'||type==='video'){
-    document.getElementById('file'+slot).click();
+    const el=document.getElementById('file'+slot);
+    // reset so re-picking the same file fires change again
+    el.value='';
+    el.click();
   } else if(type==='image'){
     const el=document.getElementById('image'+slot);
     el.value='';
@@ -2235,72 +2311,65 @@ function loadSourceType(slot,type){
       setStatus._noReset=true;
       setStatus('resolving archive.org URL…');
       resolveVideoUrl(raw).then(url=>{
+        if(_loadTok[slot]!==tok){setStatus._noReset=false;return;}
         if(!url){setStatus._noReset=false;setStatus('could not find video at archive.org');return;}
-        loadArchiveVideo(src,slot,url);
-      }).catch(e=>{setStatus._noReset=false;setStatus('archive.org error: '+e.message);});
+        loadArchiveVideo(src,slot,url,tok);
+      }).catch(e=>{setStatus._noReset=false;if(_loadTok[slot]===tok)setStatus('archive.org error: '+e.message);});
     };
     okBtn.onclick=submit;
     cancelBtn.onclick=()=>{ cleanup(); updateSourcePickState(); };
     input.onkeydown=e=>{ if(e.key==='Enter') submit(); if(e.key==='Escape'){ cleanup(); updateSourcePickState(); } };
   } else if(type==='videos'){
-    openVideosBrowser(slot,src);
+    openVideosBrowser(slot,src,tok);
   } else if(type==='webcam'){
-    if(!src.slotFx) src.slotFx=_defaultSlotFx();
     navigator.mediaDevices.enumerateDevices().then(devices=>{
+      if(_loadTok[slot]!==tok) return;
       const cams=devices.filter(d=>d.kind==='videoinput');
-      function startCam(deviceId){
-        const constraints={video:deviceId?{deviceId:{exact:deviceId}}:true,audio:false};
-        navigator.mediaDevices.getUserMedia(constraints).then(stream=>{
-          const vid=makeVideoEl();
-          vid.srcObject=stream;vid.play().catch(()=>{});
-          src.vidEl=vid;src.stream=stream;
-          src.active=true;src.label='webcam';
-          src.webcamDeviceId=deviceId||null;
-          src.webcamDevices=cams;
-          updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
-          setStatus('webcam active on '+slot);
-        }).catch(e=>{setStatus('webcam denied');});
-      }
       if(cams.length<=1){
-        startCam(cams[0]?.deviceId||null);
+        _startWebcam(slot,cams[0]?.deviceId||null,cams);
       } else {
-        src.active=false;src.label='pick cam';src.webcamDevices=cams;src.webcamPicker=true;src.webcamPickSlot=slot;src.webcamStartCam=startCam;
+        // picker shows in the slot's controls; the current source keeps
+        // running until a camera is actually loaded
+        src.webcamDevices=cams;src.webcamPicker=true;src.webcamPickSlot=slot;
+        src.webcamStartCam=deviceId=>_startWebcam(slot,deviceId,cams);
         updateSrcNodeControls(slot);updateSourcesAccordion();
         setStatus('pick camera for '+slot);
       }
-    }).catch(()=>{
-      navigator.mediaDevices.getUserMedia({video:true,audio:false}).then(stream=>{
-        const vid=makeVideoEl();
-        vid.srcObject=stream;vid.play().catch(()=>{});
-        src.vidEl=vid;src.stream=stream;
-        src.active=true;src.label='webcam';
-        updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
-        setStatus('webcam active on '+slot);
-      }).catch(e=>{setStatus('webcam denied');});
-    });
+    }).catch(()=>{ if(_loadTok[slot]===tok) _startWebcam(slot,null,null); });
   } else if(type==='screen'){
     navigator.mediaDevices.getDisplayMedia({video:{width:{max:1280},height:{max:720},frameRate:{ideal:30,max:30}},audio:false}).then(stream=>{
+      if(_loadTok[slot]!==tok){_stopStream(stream);return;}
+      _commitSource(slot);
       const vid=makeVideoEl();
       vid.srcObject=stream;vid.play().catch(()=>{});
-      src.vidEl=vid;src.stream=stream;
+      src.type='screen';src.vidEl=vid;src.stream=stream;
       src.active=true;src.label='screen';
-      stream.getVideoTracks()[0].addEventListener('ended',()=>{cleanupSource(slot);updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();setStatus(slot+' screen capture ended');});
-      updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
-      setStatus('screen capture active on '+slot);
-    }).catch(e=>{setStatus('screen capture cancelled');});
+      // resolve the slot by stream identity when the share ends — after an
+      // A↔B swap the original slot holds something else
+      stream.getVideoTracks()[0].addEventListener('ended',()=>{
+        const s=['A','B'].find(k=>sources[k].stream===stream);
+        if(!s) return;
+        cleanupSource(s);updatePreview(s);updateSrcNodeControls(s);updateSourcesAccordion();setStatus(s+' screen capture ended');
+      });
+      _srcReady(slot,'screen capture active on '+slot);
+    }).catch(e=>{if(_loadTok[slot]===tok){setStatus('screen capture cancelled');updateSourcePickState();}});
   } else if(type==='color'){
+    _commitSource(slot);src.type=type;
     src.active=true;src.label='color';src.color=slot==='A'?'#FF0000':'#0066FF';
-    updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+    _srcReady(slot);
   } else if(type==='pattern'){
+    _commitSource(slot);src.type=type;
     src.active=true;src.label='pattern';src.genParam={preset:slot==='A'?0:3,speed:0.5};
-    updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+    _srcReady(slot);
   } else if(type==='math'){
+    _commitSource(slot);src.type=type;
     src.active=true;src.label='math';src.genParam={preset:slot==='A'?0:3,speed:0.5};
-    updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+    _srcReady(slot);
   } else if(type==='text'){
+    _commitSource(slot);src.type=type;
     src.active=true;src.label='text';
     src.textParams={text:'m-or.ph',fontIndex:0,color:'#ffffff'};
-    updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
+    _srcReady(slot);
   }
   updateSourcePickState();
 }
@@ -2313,17 +2382,25 @@ function makeVideoEl(){
   v.style.display='none';document.body.appendChild(v);
   return v;
 }
+function _dropVideoEl(v){
+  if(!v) return;
+  v.pause();v.srcObject=null;v.removeAttribute('src');try{v.load();}catch(e){}v.remove();
+}
 
 function cleanupSource(slot){
   const src=sources[slot];
   const wasUrl=src.type==='url';
   if(src.stream){src.stream.getTracks().forEach(t=>t.stop());src.stream=null;}
-  if(src.vidEl){src.vidEl.pause();src.vidEl.srcObject=null;src.vidEl.src='';src.vidEl.remove();src.vidEl=null;}
-  if(src.vid2El){src.vid2El.src='';src.vid2El.remove();src.vid2El=null;}
+  if(src.vidEl){_dropVideoEl(src.vidEl);src.vidEl=null;}
+  if(src.vid2El){_dropVideoEl(src.vid2El);src.vid2El=null;}
   if(src._blobUrl){URL.revokeObjectURL(src._blobUrl);src._blobUrl=null;}
   if(src._imgBlobUrl){URL.revokeObjectURL(src._imgBlobUrl);src._imgBlobUrl=null;}
+  if(src._bmp){src._bmp.close();src._bmp=null;}
+  src._bmpVid=null;src._xfading=false;src._txtCv=null;src._txtKey=null;
   if(src.offscreen&&src.offCtx) src.offCtx.clearRect(0,0,src.offscreen.width,src.offscreen.height);
   src._imgEl=null; src.imgFx=null;
+  // a stale picker kept offering (and could start) the previous cam list
+  src.webcamPicker=false;src.webcamStartCam=null;src.webcamDevices=null;src.webcamDeviceId=null;
   src.active=false;src.type=null;src.label='empty';src.offscreen=null;src.offCtx=null;
   if(wasUrl) resetMixCanvas();
   setTimeout(updateSourcesAccordion,0);
@@ -2500,14 +2577,16 @@ function buildWebcamControls(slot,src,ctrl){
     const sel=document.createElement('select');sel.style.cssText='width:100%;background:#000;color:#fff;border:2px solid #000;font-family:var(--chrome);font-size:9px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;padding:3px 5px;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;';
     cams.forEach(cam=>{const opt=document.createElement('option');opt.value=cam.deviceId;opt.textContent=(cam.label||'camera '+cams.indexOf(cam)).replace(/\s+\(.*?\)/g,'').substring(0,28);if(src.webcamDeviceId&&cam.deviceId===src.webcamDeviceId)opt.selected=true;sel.appendChild(opt);});
     sel.onchange=()=>{
-      if(src.stream){src.stream.getTracks().forEach(t=>t.stop());src.stream=null;}
-      if(src.vidEl){src.vidEl.pause();src.vidEl.srcObject=null;src.vidEl.src='';src.vidEl.remove();src.vidEl=null;}
-      const deviceId=sel.value;
+      if(src.webcamPicker){if(src.webcamStartCam)src.webcamStartCam(sel.value);return;}
+      // keep the current camera running until the new one opens
+      const deviceId=sel.value,tok=++_loadTok[slot];
       navigator.mediaDevices.getUserMedia({video:{deviceId:{exact:deviceId}},audio:false}).then(stream=>{
+        if(_loadTok[slot]!==tok||src.type!=='webcam'){_stopStream(stream);return;}
+        _stopStream(src.stream);_dropVideoEl(src.vidEl);
         const vid=makeVideoEl();vid.srcObject=stream;vid.play().catch(()=>{});
         src.vidEl=vid;src.stream=stream;src.active=true;src.label='webcam';src.webcamDeviceId=deviceId;src.webcamPicker=false;
         updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();setStatus('camera switched on '+slot);
-      }).catch(()=>{setStatus('camera denied');});
+      }).catch(()=>{if(_loadTok[slot]===tok)setStatus('camera denied');});
     };
     if(src.webcamPicker){
       const loadBtn=document.createElement('button');loadBtn.className='tbtn';loadBtn.style.cssText='width:100%;margin-top:3px;';loadBtn.textContent='load';
@@ -2584,6 +2663,12 @@ const _noiseTiles=(()=>{
   return tiles;
 })();
 
+// patterns are created once per thumbnail canvas + tile (createPattern ran on
+// every redraw of an empty slot)
+function _tilePattern(cv,ctx,tiles,i){
+  if(!cv._pats||cv._pats.tiles!==tiles){cv._pats=new Array(tiles.length);cv._pats.tiles=tiles;}
+  return cv._pats[i]||(cv._pats[i]=ctx.createPattern(tiles[i],'repeat'));
+}
 function drawEmptySource(cv,label){
   if(label==='B'){ drawEmptySourceB(cv); return; }
   syncCanvasSize(cv);
@@ -2593,9 +2678,7 @@ function drawEmptySource(cv,label){
 
   // animated noise: cycle through pre-baked tiles at ~12fps feel
   const tileIdx=Math.floor(performance.now()/80)%_noiseTiles.length;
-  const tile=_noiseTiles[tileIdx];
-  const pat=ctx.createPattern(tile,'repeat');
-  ctx.fillStyle=pat;
+  ctx.fillStyle=_tilePattern(cv,ctx,_noiseTiles,tileIdx);
   ctx.fillRect(0,0,w,h);
 
   // dim overlay so text is readable
@@ -2667,9 +2750,7 @@ function drawEmptySourceB(cv){
 
   // scanline static — faster cycle than A (60ms) for a different feel
   const tileIdx=Math.floor(performance.now()/60)%_scanlineTiles.length;
-  const tile=_scanlineTiles[tileIdx];
-  const pat=ctx.createPattern(tile,'repeat');
-  ctx.fillStyle=pat;
+  ctx.fillStyle=_tilePattern(cv,ctx,_scanlineTiles,tileIdx);
   ctx.fillRect(0,0,w,h);
 
   // slightly lighter overlay than A so the horizontal banding reads through
@@ -3546,7 +3627,7 @@ const TIPS={
     'Click any result to load it. Hit <b>refresh</b> for a new set.',
     'Good for happy accidents during live sets.'
   ]},
-  color:{icon:'■',title:'solid color',tips:[
+  solidcolor:{icon:'■',title:'solid color',tips:[
     '<b>Solid color</b> — fills the source slot with a flat color.',
     'Most useful as a <b>background layer</b> combined with the keyer module.',
     'Try: solid color in A, video in B, add a keyer — key out the background of B over the color.',
@@ -3704,7 +3785,7 @@ function setHelperContext(ctx){
   document.getElementById('helper-title').textContent=t.title;
   document.getElementById('helper-tip').innerHTML=t.tips.map(tip=>`<span class="tip-line">${tip}</span>`).join('');
 }
-const nameToKey=n=>n==='pixel operations'||n==='pixelops'?'pixelops':n==='perlin noise'?'perlin':n==='random walk'?'randwalk':n==='XY pad'?'xypad':n==='screen capture'?'screen':n==='solid color'?'color':n==='moving pattern'?'pattern':n==='mathematical'?'mathematical':n==='block corrupt'?'blockcorrupt':n==='row shift'?'rowshift':n==='pixel sort'?'pixelsort':n==='signal noise'?'signalnoise':n==='VHS'?'vhs':n==='oscillator'?'LFO':n==='archive'?'url':n==='random'?'videos':n==='text'?'text':n;
+const nameToKey=n=>n==='pixel operations'||n==='pixelops'?'pixelops':n==='perlin noise'?'perlin':n==='random walk'?'randwalk':n==='XY pad'?'xypad':n==='screen capture'?'screen':n==='solid color'?'solidcolor':n==='moving pattern'?'pattern':n==='mathematical'?'mathematical':n==='block corrupt'?'blockcorrupt':n==='row shift'?'rowshift':n==='pixel sort'?'pixelsort':n==='signal noise'?'signalnoise':n==='VHS'?'vhs':n==='oscillator'?'LFO':n==='archive'?'url':n==='random'?'videos':n==='text'?'text':n;
 // hover: show tip unless locked by a click
 document.addEventListener('mouseover',e=>{
   if(helperLocked) return;
@@ -3751,22 +3832,52 @@ document.addEventListener('click',e=>{
   }
 });
 
+// which slot owns this video element right now (A↔B swap moves elements)
+function _srcOfVid(v){
+  for(const k of ['A','B']){const s=sources[k];if(s.vidEl===v||s.vid2El===v)return s;}
+  return null;
+}
+// loop crossfade: vid2 stays paused (no second decode) until the playing
+// element enters its last FADE_DUR seconds, then starts at 0 underneath;
+// when the fade completes the two swap roles and the old one is parked
+function _vidEndXfade(src){
+  const a=src.vidEl,b=src.vid2El;
+  src._xfading=false;
+  if(!a) return;
+  if(b&&!b.paused&&b.readyState>=2){
+    src.vidEl=b;src.vid2El=a;
+    a.pause();try{a.currentTime=0;}catch(e){}
+  } else {
+    // no partner ready (short clip / still buffering) — plain loop
+    if(b&&!b.paused){b.pause();try{b.currentTime=0;}catch(e){}}
+    try{a.currentTime=0;}catch(e){}
+    a.play().catch(()=>{});
+  }
+}
+function _onVidEnded(e){
+  const v=e.target,src=_srcOfVid(v);
+  if(!src) return;
+  if(src.vidEl===v) _vidEndXfade(src);
+  else {v.pause();try{v.currentTime=0;}catch(err){}}
+}
+
 function loadFile(s,inp){
   if(!inp.files[0]){updateSourcePickState();return;}
   const f=inp.files[0];
+  // reset so picking the same file again still fires change
+  inp.value='';
   const src=sources[s];
-  if(src._blobUrl){URL.revokeObjectURL(src._blobUrl);src._blobUrl=null;}
+  ++_loadTok[s];
+  _commitSource(s);
   const url=URL.createObjectURL(f);
   src._blobUrl=url;
-  if(src.vidEl){src.vidEl.pause();src.vidEl.srcObject=null;src.vidEl.src='';src.vidEl.remove();src.vidEl=null;}
-  if(src.vid2El){src.vid2El.src='';src.vid2El.remove();src.vid2El=null;}
-  if(src.stream){src.stream.getTracks().forEach(t=>t.stop());src.stream=null;}
-  src.offscreen=null;src.offCtx=null;
   const vid=makeVideoEl();
   const vid2=makeVideoEl();
+  vid2.autoplay=false;vid2.preload='auto';
   vid.src=url;vid.load();vid.play().catch(()=>{});
   vid2.src=url;vid2.load();
-  vid.addEventListener('ended',()=>{vid.currentTime=0;vid.play().catch(()=>{});});
+  vid.addEventListener('ended',_onVidEnded);
+  vid2.addEventListener('ended',_onVidEnded);
   src.vidEl=vid;src.vid2El=vid2;
   src.type='file';
   src.active=true;
@@ -3782,21 +3893,23 @@ function loadImageFile(s,inp){
   if(!inp.files[0]){updateSourcePickState();return;}
   const f=inp.files[0];
   const src=sources[s];
-  if(src._imgBlobUrl){URL.revokeObjectURL(src._imgBlobUrl);src._imgBlobUrl=null;}
+  const tok=++_loadTok[s];
   const url=URL.createObjectURL(f);
-  src._imgBlobUrl=url;
-  if(src.vidEl){src.vidEl.pause();src.vidEl.srcObject=null;src.vidEl.src='';src.vidEl.remove();src.vidEl=null;}
-  if(src.vid2El){src.vid2El.src='';src.vid2El.remove();src.vid2El=null;}
-  if(src.stream){src.stream.getTracks().forEach(t=>t.stop());src.stream=null;}
-  src.offscreen=null;src.offCtx=null;
-  src._imgEl=null;
   // reset input so the same file can be re-selected or replaced
   inp.value='';
   const img=new Image();
   img.onload=()=>{
-    // image decoded into canvas — blob URL no longer needed
-    if(src._imgBlobUrl){URL.revokeObjectURL(src._imgBlobUrl);src._imgBlobUrl=null;}
-    src._imgEl=img;
+    // image decoded — blob URL no longer needed
+    URL.revokeObjectURL(url);
+    if(_loadTok[s]!==tok) return;
+    _commitSource(s);
+    // keep a canvas copy (capped at 1920×1080) instead of the <img>: drawing
+    // the element every frame measured ~2ms vs ~0.3ms for the canvas
+    const iw=img.naturalWidth||img.width,ih=img.naturalHeight||img.height;
+    const k=Math.min(1,1920/iw,1080/ih);
+    const ic=document.createElement('canvas');ic.width=Math.max(1,Math.round(iw*k));ic.height=Math.max(1,Math.round(ih*k));
+    ic.getContext('2d').drawImage(img,0,0,ic.width,ic.height);
+    src._imgEl=ic;
     src.offscreen=document.createElement('canvas');
     src.offscreen.width=W;src.offscreen.height=H;
     src.offCtx=src.offscreen.getContext('2d',{willReadFrequently:true});
@@ -3804,12 +3917,13 @@ function loadImageFile(s,inp){
     src.active=true;
     src.label=f.name.substring(0,18);
     src.type='image';
-    // preserve existing fx settings on replace, init fresh otherwise
-    if(!src.imgFx) src.imgFx={r1:0,r2:-1,r2active:false,r2start:0,speed:0.5,size:1.0,progress:1,triggered:false,startTime:0,direction:1,rotAngle:0,rotDir:1,_dissolveMap:null,_dissolveW:0,_dissolveH:0};
-    else { src.imgFx.progress=1; src.imgFx.triggered=false; src.imgFx.r2active=false; src.imgFx._dissolveMap=null; }
+    // slotFx (size/rotate/fade) carries over on replace; the old imgFx seed
+    // (size 1.0 = 200%) made every new image appear 2× zoomed
+    if(!src.slotFx) src.slotFx=_defaultSlotFx();
     updatePreview(s);updateSrcNodeControls(s);updateSourcePickState();updateSourcesAccordion();
     setStatus('image loaded on '+s+': '+f.name.substring(0,24));
   };
+  img.onerror=()=>{URL.revokeObjectURL(url);if(_loadTok[s]===tok){setStatus('could not decode image');updateSourcePickState();}};
   img.src=url;
 }
 
@@ -6337,6 +6451,16 @@ function openPicker(){}
 function closePicker(){}
 function maybeClose(){}
 
+let _midiAccess=null;
+// (re)attach handlers to every input; called on toggle and on hot-plug
+function _midiBind(){
+  const lbl=document.getElementById('mlbl');
+  if(!_midiAccess){if(lbl)lbl.textContent='no MIDI';return [];}
+  const ins=[..._midiAccess.inputs.values()];
+  ins.forEach(i=>{i.onmidimessage=state.midiOn?onMidi:null;});
+  if(lbl) lbl.textContent=state.midiOn&&ins.length?ins[0].name.substring(0,14):'no MIDI';
+  return ins;
+}
 function toggleMidi(){
   state.midiOn=!state.midiOn;
   const btn=document.getElementById('btn-midi');
@@ -6346,24 +6470,29 @@ function toggleMidi(){
     if(dot) dot.classList.add('on');
     if(navigator.requestMIDIAccess){
       navigator.requestMIDIAccess().then(a=>{
-        const ins=[...a.inputs.values()];
-        if(ins.length){
-          document.getElementById('mlbl').textContent=ins[0].name.substring(0,14);
-          ins.forEach(i=>{i.onmidimessage=onMidi;});
-          setStatus('MIDI: '+ins[0].name);
-        } else setStatus('no MIDI devices');
+        _midiAccess=a;
+        a.onstatechange=()=>{const n=_midiBind().length;if(state.midiOn)setStatus(n?'MIDI: '+n+' input'+(n>1?'s':''):'no MIDI devices');};
+        if(!state.midiOn){_midiBind();return;} // toggled off while the prompt was up
+        const ins=_midiBind();
+        if(ins.length) setStatus('MIDI: '+ins[0].name);
+        else setStatus('no MIDI devices');
       }).catch(()=>setStatus('MIDI denied'));
     }
   } else {
     if(btn){btn.textContent='MIDI off';btn.classList.remove('on');}
     if(dot) dot.classList.remove('on');
+    // detach — "off" used to only change the UI while CC7 kept moving the fader
+    _midiBind();
+    if(_midiAccess) _midiAccess.onstatechange=null;
     document.getElementById('mlbl').textContent='no MIDI';
   }
 }
 
 function onMidi(msg){
+  if(!state.midiOn) return;
   const[status,cc,val]=msg.data;
-  if(status===176&&cc===7){
+  // CC7 on any channel (status 0xB0–0xBF)
+  if((status&0xF0)===0xB0&&cc===7){
     const v=Math.round(val/127*100);
     setXfade(v);document.getElementById('mxf').value=v;
   }
@@ -6377,30 +6506,48 @@ function flashMidi(){
   if(!state.midiOn)setTimeout(()=>d.classList.remove('on'),100);
 }
 
+// writes the audience page into the (same-origin, about:blank) popup. the
+// keydown script used to be split as `<scr\`+\`ipt>` inside the template
+// literal, which wrote that text literally — F-fullscreen never worked.
+function _writeOutputDoc(w){
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html><head><title>m-or.ph output</title><style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    html,body{background:#000;width:100%;height:100%;overflow:hidden;}
+    canvas{display:block;width:100%;height:100%;object-fit:contain;}
+  </style></head><body><canvas id="c"></canvas><script>
+    document.addEventListener('keydown',e=>{
+      if(e.key==='f'||e.key==='F') document.documentElement.requestFullscreen().catch(()=>{});
+    });
+  <\/script></body></html>`);
+  w.document.close();
+}
+function _outputClosed(){
+  clearInterval(state._outWatch);state._outWatch=null;
+  state.outputWin=null;
+  state.outputStreaming=false;
+  state._outputWinReady=false;
+  state.modules.forEach(m=>{m._skipFrame=0;m._lastResult=null;});
+  const b=document.getElementById('btn-out');
+  if(b){b.textContent='output window';b.classList.remove('on');}
+}
 function openOutput(){
   const btn=document.getElementById('btn-out');
   if(state.outputWin&&!state.outputWin.closed){state.outputWin.focus();return;}
   if(window._stopWorkerRender) window._stopWorkerRender();
 
-  state.outputWin=window.open('','vs-out','width=1280,height=720,menubar=no,toolbar=no,location=no');
+  // popup blockers return null — bail before touching streaming state
+  const w=window.open('','vs-out','width=1280,height=720,menubar=no,toolbar=no,location=no');
+  if(!w){setStatus('output window blocked — allow pop-ups for this site and try again');return;}
+  try{_writeOutputDoc(w);}catch(e){try{w.close();}catch(_){} setStatus('could not open output window');return;}
+  state.outputWin=w;
   state.outputStreaming=true;
   state._outputWinReady=false;
   if(state.bc){try{state.bc.close();}catch(e){} state.bc=null;}
 
-  state.outputWin.document.write(`<!DOCTYPE html><html><head><style>
-    *{margin:0;padding:0;box-sizing:border-box;}
-    html,body{background:#000;width:100%;height:100%;overflow:hidden;}
-    canvas{display:block;width:100%;height:100%;object-fit:contain;}
-  </style></head><body><canvas id="c"></canvas><scr\`+\`ipt>
-    document.addEventListener('keydown',e=>{
-      if(e.key==='f'||e.key==='F') document.documentElement.requestFullscreen().catch(()=>{});
-    });
-  <\/script></body></html>`);
-  state.outputWin.document.close();
-
   // give the child window time to fully parse and render its DOM
   setTimeout(()=>{
-    if(state.outputWin&&!state.outputWin.closed){
+    if(state.outputWin===w&&!w.closed){
       state._outputWinReady=true;
     }
   },300);
@@ -6408,22 +6555,21 @@ function openOutput(){
   btn.textContent='output open';btn.classList.add('on');
   setStatus('output window open — press F to fullscreen');
 
-  const closeWatcher=setInterval(()=>{
-    if(!state.outputWin||state.outputWin.closed){
-      clearInterval(closeWatcher);
-      state.outputWin=null;
-      state.outputStreaming=false;
-      state._outputWinReady=false;
-      state.modules.forEach(m=>{m._skipFrame=0;m._lastResult=null;});
-      const b=document.getElementById('btn-out');
-      if(b){b.textContent='output window';b.classList.remove('on');}
-    }
+  // one watcher: resets streaming when the window closes, and re-writes the
+  // page if the user reloaded the popup (canvas #c gone → frames went nowhere)
+  clearInterval(state._outWatch);
+  state._outWatch=setInterval(()=>{
+    const ow=state.outputWin;
+    if(!ow||ow.closed){_outputClosed();return;}
+    try{
+      if(ow.document.readyState==='complete'&&!ow.document.getElementById('c')) _writeOutputDoc(ow);
+    }catch(e){_outputClosed();}
   },1000);
 }
 
 /* ── RECORDER ── */
 const REC_MAX=60; // seconds
-let recorder=null,recChunks=[],recTimer=null,recSeconds=0;
+let recorder=null,recTimer=null,recSeconds=0;
 let countdownActive=false,countdownInterval=null;
 let captureAspect='16:9'; // '16:9' | '1:1' | '9:16'
 let captureCountdown=0;   // 0 = off, 3 = 3s
@@ -6460,11 +6606,18 @@ function _capCropRect(){
   if(captureAspect==='9:16'){const w=Math.round(sh*9/16/2)*2;return {x:Math.round((sw-w)/2),y:0,w:w,h:sh};}
   return {x:0,y:0,w:sw,h:sh};
 }
-function _drawRecFrame(){
+// one nearest-neighbor blit straight from the output canvas (crop rect mapped
+// from 720p capture space back to W×H), throttled to the 30fps stream rate —
+// was two full-frame blits every rAF, 4× the work on a 120Hz display
+let _recLast=0;
+function _drawRecFrame(force){
   if(!_recCtx) return;
-  _drawCapFrame();
+  const now=performance.now();
+  if(!force&&now-_recLast<29) return;
+  _recLast=now;
+  const kx=W/capCv.width,ky=H/capCv.height,c=_recCrop;
   _recCtx.imageSmoothingEnabled=false;
-  _recCtx.drawImage(capCv,_recCrop.x,_recCrop.y,_recCrop.w,_recCrop.h,0,0,_recCrop.w,_recCrop.h);
+  _recCtx.drawImage(outputCv,c.x*kx,c.y*ky,c.w*kx,c.h*ky,0,0,c.w,c.h);
 }
 
 /* ── CROP CANVAS helper ── */
@@ -6480,13 +6633,19 @@ function getCroppedCanvas(){
 }
 
 /* ── CAPTURE PANEL ── */
+let _capPanelClose=null,_capPanelSetRec=null;
 function openCapturePanel(){
   if(_capturePanelOpen){
-    const existing=document.getElementById('capture-panel');
-    if(existing&&!countdownActive){existing.remove();_capturePanelOpen=false;}
+    if(!countdownActive){
+      if(_capPanelClose) _capPanelClose();
+      else{const ex=document.getElementById('capture-panel');if(ex)ex.remove();_capturePanelOpen=false;}
+    }
     return;
   }
   _capturePanelOpen=true;
+  // every document listener of this panel hangs off one controller, aborted
+  // in closePanel — escH/outsideH used to be removed only when they fired
+  const ac=new AbortController(),sig={signal:ac.signal};
 
   const isDark=document.body.classList.contains('dark');
   const panel=document.createElement('div');
@@ -6562,20 +6721,22 @@ function openCapturePanel(){
   document.body.appendChild(panel);
 
   // close
+  let _outsideT=0,_capPollIv=0;
   function closePanel(){
+    ac.abort();clearTimeout(_outsideT);clearInterval(_capPollIv);
     panel.remove();
     _capturePanelOpen=false;
+    if(_capPanelClose===closePanel){_capPanelClose=null;_capPanelSetRec=null;}
   }
-  document.getElementById('cap-close').onclick=closePanel;
-  const escH=e=>{if(e.key==='Escape'&&!countdownActive){closePanel();document.removeEventListener('keydown',escH);}};
-  document.addEventListener('keydown',escH);
+  _capPanelClose=closePanel;
+  panel.querySelector('#cap-close').onclick=closePanel;
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!countdownActive)closePanel();},sig);
   // click outside
-  setTimeout(()=>{
-    document.addEventListener('mousedown',function outsideH(e){
-      if(!panel.contains(e.target)&&e.target.id!=='capture-open-btn'&&!document.getElementById('capture-open-btn').contains(e.target)){
-        if(!countdownActive){closePanel();document.removeEventListener('mousedown',outsideH);}
-      }
-    });
+  _outsideT=setTimeout(()=>{
+    document.addEventListener('mousedown',e=>{
+      const ob=document.getElementById('capture-open-btn');
+      if(!panel.contains(e.target)&&!(ob&&ob.contains(e.target))&&!countdownActive) closePanel();
+    },sig);
   },100);
 
   // aspect ratio buttons
@@ -6607,14 +6768,14 @@ function openCapturePanel(){
   });
 
   function setCaptureStatus(msg){
-    const el=document.getElementById('cap-status');
+    const el=panel.querySelector('#cap-status');
     if(el) el.textContent=msg;
   }
 
   function setVideoRecState(rec){
-    const vBtn=document.getElementById('cap-video-btn');
-    const vLbl=document.getElementById('cap-video-lbl');
-    const iconSlot=document.getElementById('cap-video-icon');
+    const vBtn=panel.querySelector('#cap-video-btn');
+    const vLbl=panel.querySelector('#cap-video-lbl');
+    const iconSlot=panel.querySelector('#cap-video-icon');
     if(!vBtn||!vLbl||!iconSlot) return;
     if(rec){
       vBtn.style.background='#fff';
@@ -6626,20 +6787,27 @@ function openCapturePanel(){
       vBtn.style.color='#fff';
       iconSlot.outerHTML=videoIconSVG;
       vLbl.textContent='VIDEO';
+      setCaptureStatus('');
     }
   }
+  // the recorder resets the panel itself (60s auto-stop, toggleRecord, onstop)
+  _capPanelSetRec=setVideoRecState;
+  if(recorder&&recorder.state==='recording') setVideoRecState(true);
 
   // photo
-  document.getElementById('cap-photo-btn').onclick=()=>{
+  panel.querySelector('#cap-photo-btn').onclick=()=>{
     if(countdownActive) return;
     runWithCountdown(()=>{
       doFlash(()=>{
-        state._tutCapture=true;
         const cv=getCroppedCanvas();
         const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
         const filename='morph-photo-'+ts+'.png';
+        let href;
+        try{href=cv.toDataURL('image/png');}
+        catch(e){setStatus('photo blocked — a cross-origin source tainted the canvas');setCaptureStatus('');return;}
         const link=document.createElement('a');
-        link.download=filename;link.href=cv.toDataURL('image/png');link.click();
+        link.download=filename;link.href=href;link.click();
+        state._tutCapture=true;
         setStatus('photo saved');
         showSavePopup('📷 photo saved → '+filename);
         setCaptureStatus('');
@@ -6648,14 +6816,11 @@ function openCapturePanel(){
   };
 
   // video
-  document.getElementById('cap-video-btn').onclick=()=>{
+  panel.querySelector('#cap-video-btn').onclick=()=>{
     if(recorder&&recorder.state==='recording'){
-      state._tutCapture=true;
       stopRecord();
-      setVideoRecState(false);
-      setCaptureStatus('');
     } else if(!countdownActive){
-      runWithCountdown(()=>{ state._tutCapture=true; startRecord(); setVideoRecState(true); });
+      runWithCountdown(()=>{ startRecord(); });
     }
   };
 
@@ -6664,32 +6829,32 @@ function openCapturePanel(){
     let remaining=captureCountdown;
     countdownActive=true;
     setCaptureStatus(remaining+'...');
+    // escCD lives only as long as this countdown (and the panel)
+    const cd=new AbortController();
+    ac.signal.addEventListener('abort',()=>cd.abort());
     countdownInterval=setInterval(()=>{
       remaining--;
       if(remaining<=0){
         clearInterval(countdownInterval);countdownInterval=null;
-        countdownActive=false;
+        countdownActive=false;cd.abort();
         setCaptureStatus('');
         onComplete();
       } else {
         setCaptureStatus(remaining+'...');
       }
     },1000);
-    const escCD=e=>{
+    document.addEventListener('keydown',e=>{
       if(e.key==='Escape'&&countdownActive){
         clearInterval(countdownInterval);countdownInterval=null;
-        countdownActive=false;
+        countdownActive=false;cd.abort();
         setCaptureStatus('cancelled');
         setTimeout(()=>setCaptureStatus(''),1200);
-        document.removeEventListener('keydown',escCD);
       }
-    };
-    document.addEventListener('keydown',escCD);
+    },{signal:cd.signal});
   }
 
   // poll to keep rec timer in status box
-  const _capPollIv=setInterval(()=>{
-    if(!document.getElementById('capture-panel')){clearInterval(_capPollIv);return;}
+  _capPollIv=setInterval(()=>{
     const rec=recorder&&recorder.state==='recording';
     if(rec) setCaptureStatus('● '+recSeconds+'s / '+REC_MAX+'s');
   },500);
@@ -6726,7 +6891,7 @@ function doFlash(cb){
   },180);
 }
 
-/* ── PHOTO (legacy compat for tutorial hooks) ── */
+/* ── PHOTO / RECORD shortcuts (open the panel and press its button) ── */
 function takePhoto(){
   if(!_capturePanelOpen) openCapturePanel();
   setTimeout(()=>{const b=document.getElementById('cap-photo-btn');if(b)b.click();},80);
@@ -6742,50 +6907,77 @@ function toggleRecord(){
   }
 }
 
+// first container the browser can record — Safari only does mp4
+const _REC_TYPES=[['video/webm;codecs=vp9','webm'],['video/webm;codecs=vp8','webm'],['video/webm','webm'],['video/mp4;codecs=avc1','mp4'],['video/mp4','mp4']];
+function _recType(){
+  if(typeof MediaRecorder==='undefined') return null;
+  for(const t of _REC_TYPES) if(MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(t[0])) return {mime:t[0],ext:t[1]};
+  return {mime:'',ext:''};
+}
+
 function startRecord(){
   if(!outputCv){setStatus('no output to record');return;}
-  recChunks=[];recSeconds=0;
-  // record from the fixed 720p capture canvas (honors the aspect setting)
-  _syncCapSize();_drawCapFrame();
-  _recCrop=_capCropRect();
-  _recCv=document.createElement('canvas');_recCv.width=_recCrop.w;_recCv.height=_recCrop.h;
-  _recCtx=_recCv.getContext('2d');
-  _drawRecFrame();
-  const stream=_recCv.captureStream(30);
-  const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-    ?'video/webm;codecs=vp9':'video/webm';
-  recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:8000000});
-  recorder.ondataavailable=e=>{if(e.data&&e.data.size>0)recChunks.push(e.data);};
-  recorder.onstop=()=>{
-    const blob=new Blob(recChunks,{type:'video/webm'});
+  if(recorder&&recorder.state!=='inactive') return;
+  const rt=_recType();
+  if(!rt){setStatus('recording not supported in this browser');return;}
+  // per-recording state: a quick stop→start used to let the old onstop read
+  // (and wipe) the new recording's chunks and canvas
+  _syncCapSize();
+  const crop=_capCropRect();
+  const cv=document.createElement('canvas');cv.width=crop.w;cv.height=crop.h;
+  const cx=cv.getContext('2d');
+  let stream,rec;
+  try{stream=cv.captureStream(30);}
+  catch(e){setStatus(e.name==='SecurityError'?'recording blocked — a cross-origin source tainted the canvas':'recording failed: '+e.message);return;}
+  try{rec=new MediaRecorder(stream,rt.mime?{mimeType:rt.mime,videoBitsPerSecond:8000000}:{videoBitsPerSecond:8000000});}
+  catch(e){stream.getTracks().forEach(t=>t.stop());setStatus('recording failed: '+e.message);return;}
+  const chunks=[];
+  _recCv=cv;_recCtx=cx;_recCrop=crop;
+  _drawRecFrame(true);
+  rec.ondataavailable=e=>{if(e.data&&e.data.size>0)chunks.push(e.data);};
+  rec.onstop=()=>{
+    stream.getTracks().forEach(t=>t.stop());
+    if(_recCv===cv){_recCv=null;_recCtx=null;_recCrop=null;}
+    const type=(rec.mimeType||rt.mime||'video/webm').split(';')[0];
+    const ext=rt.ext||(type.includes('mp4')?'mp4':'webm');
+    const blob=new Blob(chunks,{type});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-    const filename='morph-video-'+ts+'.webm';
+    const filename='morph-video-'+ts+'.'+ext;
     a.href=url;a.download=filename;
     document.body.appendChild(a);a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    recChunks=[];
-    _recCv=null;_recCtx=null;_recCrop=null;
-    setRecUI(false);
+    // revoking right after click() cancels the download in Firefox/Safari
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
     setStatus('recording saved');
-    showSavePopup('⏺ video saved → '+filename+' ('+recSeconds+'s)');
+    showSavePopup('⏺ video saved → '+filename+' ('+(rec._secs||0)+'s)');
   };
-  recorder.start(100);
+  try{rec.start(100);}
+  catch(e){stream.getTracks().forEach(t=>t.stop());_recCv=null;_recCtx=null;_recCrop=null;setStatus('recording failed: '+e.message);return;}
+  recorder=rec;recSeconds=0;
+  state._tutCapture=true;
   setRecUI(true);
+  if(_capPanelSetRec) _capPanelSetRec(true);
+  clearInterval(recTimer);
   recTimer=setInterval(()=>{
     recSeconds++;
-    document.getElementById('rec-lbl').textContent=recSeconds+'s';
+    const l=document.getElementById('rec-lbl');if(l)l.textContent=recSeconds+'s';
     if(recSeconds>=REC_MAX) stopRecord();
   },1000);
   setStatus('recording @ 720p — max 60s');
 }
 
+// UI resets here (not in onstop, which fires later and may belong to an
+// older recording) so auto-stop / toggleRecord leave the panel on VIDEO
 function stopRecord(){
   if(!recorder) return;
   clearInterval(recTimer);recTimer=null;
-  recorder.stop();recorder=null;
+  const r=recorder;recorder=null;
+  r._secs=recSeconds;
+  if(r.state!=='inactive') r.stop();
+  setRecUI(false);
+  if(_capPanelSetRec) _capPanelSetRec(false);
 }
 
 function setRecUI(on){
@@ -6902,6 +7094,14 @@ function launchSequence(){
   const title=document.getElementById('boot-title');
   const GLITCH='▓▒░█▄▀■□▪▫╬╪╫╥╤╦╗╔╝╚┼┤├┬┴─│';
   const rnd=()=>GLITCH[Math.floor(Math.random()*GLITCH.length)];
+  // Enter on the focused button dismisses via the keydown handler and then
+  // still clicks it — don't start a sequence on a dismissed (or running) boot
+  if(!overlay||overlay.classList.contains('dismissed')||window._launchTos) return;
+  // every phase timeout / interval is tracked so an early dismiss can stop
+  // the launch screen (pointer-events:all) from reappearing over the app
+  const _to=(fn,ms)=>{const id=setTimeout(fn,ms);window._launchTos.push(id);return id;};
+  const _iv=(fn,ms)=>{const id=setInterval(fn,ms);if(window._launchIvs)window._launchIvs.push(id);return id;};
+  window._launchTos=[];
 
   // lock button
   const btn=document.querySelector('.boot-btn-main');
@@ -6947,7 +7147,7 @@ function launchSequence(){
   window._launchIvs=[flashIv,scrambleIv,bandIv];
 
   // Phase 2: blackout at 1800ms
-  setTimeout(()=>{
+  _to(()=>{
     clearInterval(flashIv);
     clearInterval(scrambleIv);
     clearInterval(bandIv);
@@ -6964,7 +7164,7 @@ function launchSequence(){
   },1800);
 
   // Phase 3: boot screen at 2000ms
-  setTimeout(()=>{
+  _to(()=>{
     const screen=document.getElementById('boot-launch-screen');
     const linesEl=document.getElementById('boot-launch-lines');
     const progressWrap=document.getElementById('boot-progress-wrap');
@@ -6992,7 +7192,7 @@ function launchSequence(){
       const len=finalText.length;
       let frame=0;
       const totalFrames=18;
-      const iv=setInterval(()=>{
+      const iv=_iv(()=>{
         frame++;
         const revealed=Math.floor((frame/totalFrames)*len);
         let out='';
@@ -7037,11 +7237,11 @@ function launchSequence(){
   },2000);
 
   // Phase 4: glitch out at 3000ms then reveal app
-  setTimeout(()=>{
+  _to(()=>{
     const screen=document.getElementById('boot-launch-screen');
 
     let flicks=0;
-    const flickIv=setInterval(()=>{
+    const flickIv=_iv(()=>{
       screen.style.opacity=flicks%2===0?'0':'1';
       if(++flicks>6){
         clearInterval(flickIv);
@@ -7070,6 +7270,10 @@ function dismissBoot(){
   ov.classList.add('dismissed');
   if(window._fontMorpherCleanup){window._fontMorpherCleanup();window._fontMorpherCleanup=null;}
   if(window._launchIvs){window._launchIvs.forEach(iv=>clearInterval(iv));window._launchIvs=null;}
+  if(window._launchTos){window._launchTos.forEach(t=>clearTimeout(t));window._launchTos=null;}
+  // early exit (Enter/Escape) mid-sequence: the launch screen must not stay up
+  const ls=document.getElementById('boot-launch-screen');
+  if(ls){ls.classList.remove('visible');ls.style.opacity='0';ls.style.pointerEvents='none';}
   setTimeout(()=>{try{ov.remove();}catch(e){ov.style.display='none';}},320);
 }
 window.dismissBoot=dismissBoot;
@@ -7192,6 +7396,24 @@ function toggleCRT(){
   if(on){ _startCRTGlitch(); }
   else { _stopCRTGlitch(); }
 }
+// every CRT timer is tracked so rapid toggles can't pile up flicker chains
+// or leave a pending "slip" that later wipes the .app transform (TV scaling)
+const _crtTos=new Set();
+let _crtRollAnim=null;
+function _crtTo(fn,ms){const id=setTimeout(()=>{_crtTos.delete(id);fn();},ms);_crtTos.add(id);return id;}
+// rolling band on the compositor: WAAPI transform instead of moving `top`
+// every 30ms (a layout per tick). same path: 0.4%/30ms of the overlay height,
+// first pass from -40%, then looping -10% → 110%
+function _crtRoll(roller,fromPct){
+  if(_crtRollAnim){_crtRollAnim.onfinish=null;_crtRollAnim.cancel();_crtRollAnim=null;}
+  if(!roller.isConnected||!roller.animate) return;
+  const ov=document.getElementById('crt-overlay');
+  const h=(ov&&ov.clientHeight)||window.innerHeight;
+  const dur=(110-fromPct)/0.4*30;
+  _crtRollAnim=roller.animate([{transform:'translateY('+(fromPct/100*h)+'px)'},{transform:'translateY('+(1.1*h)+'px)'}],{duration:dur,easing:'linear'});
+  _crtRollAnim.onfinish=()=>_crtRoll(roller,-10);
+}
+window.addEventListener('resize',()=>{const r=document.getElementById('crt-roller');if(r&&_crtRollAnim)_crtRoll(r,-10);});
 function _startCRTGlitch(){
   _stopCRTGlitch();
   const line=document.getElementById('crt-glitch-line');
@@ -7200,15 +7422,9 @@ function _startCRTGlitch(){
   // rolling band — a slow drifting lighter horizontal stripe
   const roller=document.createElement('div');
   roller.id='crt-roller';
-  roller.style.cssText='position:absolute;left:0;right:0;height:40px;background:rgba(255,255,255,0.03);pointer-events:none;z-index:4;top:0;transition:none;';
+  roller.style.cssText='position:absolute;left:0;right:0;height:40px;background:rgba(255,255,255,0.03);pointer-events:none;z-index:4;top:0;transition:none;will-change:transform;';
   document.getElementById('crt-overlay').appendChild(roller);
-  let rollerY=-40;
-  const rollerIv=setInterval(()=>{
-    if(!document.body.classList.contains('crt')){ clearInterval(rollerIv); roller.remove(); return; }
-    rollerY+=0.4;
-    if(rollerY>110) rollerY=-10;
-    roller.style.top=rollerY+'%';
-  },30);
+  _crtRoll(roller,-40);
 
   // subtle flicker — whole overlay dims slightly on irregular cadence
   const flickerEl=document.createElement('div');
@@ -7216,15 +7432,15 @@ function _startCRTGlitch(){
   flickerEl.style.cssText='position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;z-index:6;';
   document.getElementById('crt-overlay').appendChild(flickerEl);
   function doFlicker(){
-    if(!document.body.classList.contains('crt')){ flickerEl.remove(); return; }
+    if(!document.body.classList.contains('crt')||!flickerEl.isConnected){ flickerEl.remove(); return; }
     flickerEl.style.opacity=(0.02+Math.random()*0.03).toString();
-    setTimeout(()=>{
+    _crtTo(()=>{
       flickerEl.style.opacity='0';
       // next flicker in 2–8 seconds
-      setTimeout(doFlicker, 2000+Math.random()*6000);
+      _crtTo(doFlicker, 2000+Math.random()*6000);
     }, 60+Math.random()*80);
   }
-  setTimeout(doFlicker, 1000+Math.random()*3000);
+  _crtTo(doFlicker, 1000+Math.random()*3000);
 
   _crtGlitchIv=setInterval(()=>{
     if(!document.body.classList.contains('crt')){ _stopCRTGlitch(); return; }
@@ -7237,40 +7453,44 @@ function _startCRTGlitch(){
       line.style.opacity='1';
       line.style.width=(40+Math.random()*60)+'%';
       line.style.left=(Math.random()*30)+'%';
-      setTimeout(()=>{ if(line) line.style.opacity='0'; }, 60+Math.random()*80);
+      _crtTo(()=>{ if(line) line.style.opacity='0'; }, 60+Math.random()*80);
     }
     // wider semi-transparent band
     if(band && Math.random()>0.5){
       band.style.top=(y+Math.random()*4-2)+'%';
       band.style.opacity='1';
-      setTimeout(()=>{ if(band) band.style.opacity='0'; }, 80+Math.random()*120);
+      _crtTo(()=>{ if(band) band.style.opacity='0'; }, 80+Math.random()*120);
     }
     // vertical hold slip — whole screen shifts down for 1 frame, very rare
-    if(Math.random()>0.92){
+    const _tv=document.body.classList.contains('tv');
+    if(!_tv&&Math.random()>0.92){
       const app=document.querySelector('.app');
       if(app){
         const slip=8+Math.floor(Math.random()*16);
         app.style.transform=`translateY(${slip}px)`;
-        setTimeout(()=>{ app.style.transform=''; }, 40+Math.random()*40);
+        _crtTo(()=>{ app.style.transform=''; }, 40+Math.random()*40);
       }
     }
     // horizontal frame nudge
-    if(Math.random()>0.85){
+    if(!_tv&&Math.random()>0.85){
       const app=document.querySelector('.app');
       if(app){
         const shift=(Math.random()>0.5?1:-1)*(2+Math.floor(Math.random()*4));
         app.style.transform=`translateX(${shift}px)`;
-        setTimeout(()=>{ app.style.transform=''; }, 50+Math.random()*60);
+        _crtTo(()=>{ app.style.transform=''; }, 50+Math.random()*60);
       }
     }
   }, 400);
 }
 function _stopCRTGlitch(){
   if(_crtGlitchIv){ clearInterval(_crtGlitchIv); _crtGlitchIv=null; }
+  _crtTos.forEach(id=>clearTimeout(id));_crtTos.clear();
+  if(_crtRollAnim){_crtRollAnim.onfinish=null;_crtRollAnim.cancel();_crtRollAnim=null;}
   const app=document.querySelector('.app');
-  if(app) app.style.transform='';
-  const r=document.getElementById('crt-roller'); if(r) r.remove();
-  const f=document.getElementById('crt-flicker'); if(f) f.remove();
+  if(app&&!document.body.classList.contains('tv')) app.style.transform='';
+  const line=document.getElementById('crt-glitch-line'); if(line) line.style.opacity='0';
+  const band=document.getElementById('crt-glitch-band'); if(band) band.style.opacity='0';
+  document.querySelectorAll('#crt-roller,#crt-flicker').forEach(el=>el.remove());
 }
 /* ── PiP WINDOW ── */
 let pipActive=false;
@@ -7366,7 +7586,9 @@ function ensureGenCanvas(src){
   if(!src.genCv){
     src.genCv=document.createElement('canvas');
     src.genCv.width=gW; src.genCv.height=gH;
-    src.genCtx=src.genCv.getContext('2d',{willReadFrequently:true});
+    // never read back (no willReadFrequently): that flag forced CPU raster
+    // for all the path drawing and the upscale
+    src.genCtx=src.genCv.getContext('2d');
   }
   if(!src.offscreen){
     src.offscreen=document.createElement('canvas');
@@ -7385,6 +7607,73 @@ function finishGenCanvas(src){
   return src.offscreen;
 }
 
+/* ── generator helpers: no per-frame allocation ── */
+const _GEN_LE=new Uint8Array(new Uint32Array([1]).buffer)[0]===1;
+// pack r,g,b (0–255 ints) as one opaque RGBA pixel for Uint32 writes
+const _px=_GEN_LE?(r,g,b)=>((255<<24)|(b<<16)|(g<<8)|r)>>>0:(r,g,b)=>((r<<24)|(g<<16)|(b<<8)|255)>>>0;
+const _c8=v=>v<=0?0:v>=255?255:Math.round(v);
+// one ImageData per source, reused until the gen canvas changes size
+function _genImg(src,ctx,w,h){
+  let im=src._genImg;
+  if(!im||im.width!==w||im.height!==h){im=src._genImg=ctx.createImageData(w,h);src._genU32=new Uint32Array(im.data.buffer);}
+  return im;
+}
+// static per-size geometry tables (shared by both slots)
+const _genGeo={};
+function _geo(w,h){
+  const k=w+'x'+h;let g=_genGeo[k];if(g) return g;
+  const n=w*h,cx=w/2,cy=h/2;
+  g=_genGeo[k]={pS:new Float32Array(n),pC:new Float32Array(n),rS:new Float32Array(n),rC:new Float32Array(n),vS:new Float32Array(n),vC:new Float32Array(n),
+    sx:new Float32Array(w),sy:new Float32Array(h),sxy:new Float32Array(w+h),ex:new Float32Array(w),ey:new Float32Array(h),hc:new Float32Array(w)};
+  for(let y=0,i=0;y<h;y++)for(let x=0;x<w;x++,i++){
+    const a=Math.sqrt(x*x+y*y)/20;g.pS[i]=Math.sin(a);g.pC[i]=Math.cos(a);           // plasma radial term
+    const dx=x-cx,dy=y-cy,r=Math.sqrt(dx*dx+dy*dy);
+    g.rS[i]=Math.sin(r/8);g.rC[i]=Math.cos(r/8);                                       // radial pulse
+    const va=6*(Math.atan2(dy,dx)+r/40);g.vS[i]=Math.sin(va);g.vC[i]=Math.cos(va);    // vortex
+  }
+  return g;
+}
+// colour lookup tables
+const _LUT_PLASMA=(()=>{const L=new Uint32Array(1024);for(let i=0;i<1024;i++){const a=i/1023*Math.PI*2;L[i]=_px(Math.round(Math.sin(a)*127+128),Math.round(Math.sin(a+2.1)*127+128),Math.round(Math.sin(a+4.2)*127+128));}return L;})();
+const _LUT_RADIAL=(()=>{const L=new Uint32Array(2048);for(let i=0;i<2048;i++){const v=i/2047,c=Math.round(v*255);L[i]=_px(c,Math.round(v*c*0.5),Math.round((1-v)*255));}return L;})();
+const _LUT_VORTEX=(()=>{const L=new Uint32Array(2048);for(let i=0;i<2048;i++){const v=i/2047;L[i]=_px(Math.round(v*200),Math.round(v*100),Math.round((1-v)*255));}return L;})();
+// hsl → rgb into a shared scratch (same maths as hsl2rgb, no array per call)
+const _hslOut=new Uint8Array(3);
+function _h2r(p,q,t){if(t<0)t+=1;if(t>1)t-=1;if(t<1/6)return p+(q-p)*6*t;if(t<1/2)return q;if(t<2/3)return p+(q-p)*(2/3-t)*6;return p;}
+function _hsl(h,s,l){
+  h/=360;
+  if(s===0){_hslOut[0]=_hslOut[1]=_hslOut[2]=Math.round(l*255);return _hslOut;}
+  const q=l<0.5?l*(1+s):l+s-l*s,p=2*l-q;
+  _hslOut[0]=Math.round(_h2r(p,q,h+1/3)*255);_hslOut[1]=Math.round(_h2r(p,q,h)*255);_hslOut[2]=Math.round(_h2r(p,q,h-1/3)*255);
+  return _hslOut;
+}
+// hsla style strings by 3° hue bucket — parsed once, not per point/segment
+const _hslaCache={};
+function _hslaBuckets(s,l,a){
+  const k=s+'|'+l+'|'+a;let b=_hslaCache[k];if(b) return b;
+  b=_hslaCache[k]=new Array(120);
+  for(let i=0;i<120;i++) b[i]='hsla('+(i*3+1.5)+','+s+'%,'+l+'%,'+a+')';
+  return b;
+}
+// draw n points (xs/ys) as w×h rects, one fill per hue bucket (bk = 0..119)
+function _fillBucketed(ctx,styles,xs,ys,bk,n,w,h,cnt,ord){
+  cnt.fill(0);
+  for(let i=0;i<n;i++) cnt[bk[i]+1]++;
+  for(let b=1;b<=120;b++) cnt[b]+=cnt[b-1];
+  for(let i=0;i<n;i++) ord[cnt[bk[i]]++]=i;
+  // cnt[b] is now the end of bucket b
+  let s=0;
+  for(let b=0;b<120;b++){
+    const e=cnt[b];
+    if(e>s){
+      ctx.fillStyle=styles[b];ctx.beginPath();
+      for(let j=s;j<e;j++){const i=ord[j];ctx.rect(xs[i],ys[i],w,h);}
+      ctx.fill();
+    }
+    s=e;
+  }
+}
+
 /* ── MOVING PATTERNS ── */
 const PATTERN_T={};
 function renderPattern(src){
@@ -7394,24 +7683,27 @@ function renderPattern(src){
   if(!PATTERN_T[id]) PATTERN_T[id]=0;
   PATTERN_T[id]+=0.016*(0.2+p.speed*2);
   const t=PATTERN_T[id];
-  const slot=src===sources.A?'A':'B';
   // run on main thread (worker disabled)
   const gW=ctx.canvas.width,gH=ctx.canvas.height;
-  const imgd=ctx.createImageData(gW,gH);
-  const d=imgd.data;
   const W=gW,H=gH; // local alias for pixel loops
 
   switch(p.preset){
-    case 0:{ // plasma
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        const v=Math.sin(x/20+t)+Math.sin(y/20+t*0.7)+Math.sin((x+y)/30+t*1.3)+Math.sin(Math.sqrt(x*x+y*y)/20+t);
-        const n=(v+4)/8;
-        const i=(y*W+x)*4;
-        d[i]=Math.round(Math.sin(n*Math.PI*2)*127+128);
-        d[i+1]=Math.round(Math.sin(n*Math.PI*2+2.1)*127+128);
-        d[i+2]=Math.round(Math.sin(n*Math.PI*2+4.2)*127+128);
-        d[i+3]=255;
+    case 0:{ // plasma — sin(x/20+t)+sin(y/20+.7t)+sin((x+y)/30+1.3t)+sin(|xy|/20+t)
+      // separable terms per row/column, the radial term via precomputed
+      // sin/cos (angle addition), palette from a LUT: same image, no per-pixel trig
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32,g=_geo(W,H);
+      const sx=g.sx,sy=g.sy,sxy=g.sxy,pS=g.pS,pC=g.pC,ct=Math.cos(t),st=Math.sin(t),L=_LUT_PLASMA;
+      for(let x=0;x<W;x++) sx[x]=Math.sin(x/20+t);
+      for(let y=0;y<H;y++) sy[y]=Math.sin(y/20+t*0.7);
+      for(let k=0;k<W+H;k++) sxy[k]=Math.sin(k/30+t*1.3);
+      for(let y=0,i=0;y<H;y++){
+        const syv=sy[y];
+        for(let x=0;x<W;x++,i++){
+          const v=sx[x]+syv+sxy[x+y]+pS[i]*ct+pC[i]*st;
+          u[i]=L[((v+4)*127.875+0.5)|0];
+        }
       }
+      ctx.putImageData(imgd,0,0);
       break;}
     case 2:{ // dye drop
       // fluid simulation: density + velocity fields
@@ -7448,23 +7740,24 @@ function renderPattern(src){
           fs.vy[idx]+=(Math.random()-0.5)*spd2;
         }
       }
-      // velocity diffuse + advect
-      function diffuse(x,x0,diff2){
-        const a=diff2*9;
+      // velocity diffuse + advect (plain loops; the per-frame closures are gone)
+      const dt0=spd2;
+      const diffuse=(x,x0,diff2)=>{
+        const a=diff2*9,k1=1+4*a;
         for(let k=0;k<4;k++)for(let j=1;j<M-1;j++)for(let i=1;i<N-1;i++){
-          x[j*N+i]=(x0[j*N+i]+a*(x[j*N+i-1]+x[j*N+i+1]+x[(j-1)*N+i]+x[(j+1)*N+i]))/(1+4*a);
+          const q=j*N+i;x[q]=(x0[q]+a*(x[q-1]+x[q+1]+x[q-N]+x[q+N]))/k1;
         }
-      }
-      function advect(d2,d0,u,v){
-        const dt0=spd2;
+      };
+      const advect=(d2,d0,uu,vv)=>{
         for(let j=1;j<M-1;j++)for(let i=1;i<N-1;i++){
-          let x=i-dt0*u[j*N+i],y2=j-dt0*v[j*N+i];
-          x=Math.max(0.5,Math.min(N-1.5,x));y2=Math.max(0.5,Math.min(M-1.5,y2));
+          const q=j*N+i;
+          let x=i-dt0*uu[q],y2=j-dt0*vv[q];
+          x=x<0.5?0.5:x>N-1.5?N-1.5:x;y2=y2<0.5?0.5:y2>M-1.5?M-1.5:y2;
           const i0=Math.floor(x),i1=i0+1,j0=Math.floor(y2),j1=j0+1;
           const s1=x-i0,s0=1-s1,t1=y2-j0,t0=1-t1;
-          d2[j*N+i]=s0*(t0*d0[j0*N+i0]+t1*d0[j1*N+i0])+s1*(t0*d0[j0*N+i1]+t1*d0[j1*N+i1]);
+          d2[q]=s0*(t0*d0[j0*N+i0]+t1*d0[j1*N+i0])+s1*(t0*d0[j0*N+i1]+t1*d0[j1*N+i1]);
         }
-      }
+      };
       // step velocity
       fs.vxP.set(fs.vx);fs.vyP.set(fs.vy);
       diffuse(fs.vx,fs.vxP,visc);diffuse(fs.vy,fs.vyP,visc);
@@ -7477,64 +7770,77 @@ function renderPattern(src){
       advect(fs.den,fs.denP,fs.vx,fs.vy);advect(fs.hue,fs.hueP,fs.vx,fs.vy);
       // decay
       for(let i=0;i<N*M;i++){fs.den[i]*=0.997;fs.vx[i]*=0.98;fs.vy[i]*=0.98;}
-      // render upscaled
-      const imgd=ctx.createImageData(W,H);const dd=imgd.data;
-      const sx=W/N,sy=H/M;
+      // render upscaled (blocks overlap and take the max, so start from zero)
+      const imgd=_genImg(src,ctx,W,H);const dd=imgd.data;dd.fill(0);
+      const sx=W/N,sy=H/M,pw=Math.ceil(sx)+1,ph=Math.ceil(sy)+1;
       for(let j=0;j<M;j++)for(let i=0;i<N;i++){
         const den=Math.min(1,fs.den[j*N+i]);
-        const hue=fs.hue[j*N+i];
-        const [rr,gg,bb]=hsl2rgb(hue,0.9,den*0.6);
+        const c=_hsl(fs.hue[j*N+i],0.9,den*0.6),rr=c[0],gg=c[1],bb=c[2];
         const px=Math.floor(i*sx),py=Math.floor(j*sy);
-        const pw=Math.ceil(sx)+1,ph=Math.ceil(sy)+1;
-        for(let dy=0;dy<ph;dy++)for(let dx=0;dx<pw;dx++){
-          const nx2=px+dx,ny2=py+dy;
-          if(nx2>=W||ny2>=H)continue;
+        const xe=Math.min(W,px+pw),ye=Math.min(H,py+ph);
+        for(let ny2=py;ny2<ye;ny2++)for(let nx2=px;nx2<xe;nx2++){
           const idx=(ny2*W+nx2)*4;
-          dd[idx]=Math.max(dd[idx],rr);
-          dd[idx+1]=Math.max(dd[idx+1],gg);
-          dd[idx+2]=Math.max(dd[idx+2],bb);
+          if(rr>dd[idx])dd[idx]=rr;
+          if(gg>dd[idx+1])dd[idx+1]=gg;
+          if(bb>dd[idx+2])dd[idx+2]=bb;
           dd[idx+3]=255;
         }
       }
       ctx.putImageData(imgd,0,0);
-      return finishGenCanvas(src);}
-    case 3:{ // radial pulse
-      const cx=W/2,cy=H/2;
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        const r=Math.sqrt((x-cx)**2+(y-cy)**2);
-        const v=Math.sin(r/8-t*4)*0.5+0.5;
-        const i=(y*W+x)*4;
-        const c=Math.round(v*255);
-        d[i]=c;d[i+1]=Math.round(v*c*0.5);d[i+2]=Math.round((1-v)*255);d[i+3]=255;
+      break;}
+    case 3:{ // radial pulse — sin(r/8-4t) via precomputed sin/cos(r/8)
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32,g=_geo(W,H);
+      const rS=g.rS,rC=g.rC,cb=Math.cos(t*4),sb=Math.sin(t*4),L=_LUT_RADIAL,n=W*H;
+      for(let i=0;i<n;i++){
+        const v=(rS[i]*cb-rC[i]*sb)*0.5+0.5;
+        u[i]=L[(v*2047+0.5)|0];
       }
+      ctx.putImageData(imgd,0,0);
       break;}
     case 4:{ // interference
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32;
       const s1x=W*0.3+Math.cos(t*0.7)*W*0.15,s1y=H*0.4+Math.sin(t*0.5)*H*0.15;
       const s2x=W*0.7+Math.cos(t*0.6+1)*W*0.15,s2y=H*0.6+Math.sin(t*0.8+2)*H*0.15;
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        const r1=Math.sqrt((x-s1x)**2+(y-s1y)**2);
-        const r2=Math.sqrt((x-s2x)**2+(y-s2y)**2);
-        const v=(Math.sin(r1/8-t*3)+Math.sin(r2/8-t*2.3))*0.5*0.5+0.5;
-        const i=(y*W+x)*4;
-        d[i]=Math.round(v*255);d[i+1]=Math.round(v*200);d[i+2]=Math.round((1-v)*255);d[i+3]=255;
+      const t3=t*3,t23=t*2.3;
+      for(let y=0,i=0;y<H;y++){
+        const d1y=(y-s1y)*(y-s1y),d2y=(y-s2y)*(y-s2y);
+        for(let x=0;x<W;x++,i++){
+          const ax=x-s1x,bx=x-s2x;
+          const r1=Math.sqrt(ax*ax+d1y),r2=Math.sqrt(bx*bx+d2y);
+          const v=(Math.sin(r1/8-t3)+Math.sin(r2/8-t23))*0.5*0.5+0.5;
+          u[i]=_px(Math.round(v*255),Math.round(v*200),Math.round((1-v)*255));
+        }
       }
+      ctx.putImageData(imgd,0,0);
       break;}
-    case 6:{ // hex grid
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        const hx=(x/20+t*0.5),hy=(y/20+t*0.3);
-        const q=hx*2/3,r2=-hx/3+Math.sqrt(3)/3*hy;
-        const v=Math.sin(Math.round(q)*2+t)*Math.cos(Math.round(r2)*3+t*1.3)*0.5+0.5;
-        const edge=Math.abs(Math.sin((hx%1)*Math.PI))*Math.abs(Math.sin((hy%1)*Math.PI));
-        const i=(y*W+x)*4;
-        const c=Math.round(v*255*(0.3+edge*0.7));
-        d[i]=c;d[i+1]=Math.round(c*0.7);d[i+2]=Math.round(c*1.2>255?255:c*1.2);d[i+3]=255;
+    case 6:{ // hex grid — column / row terms hoisted out of the pixel loop
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32,g=_geo(W,H);
+      const ex=g.ex,ey=g.ey,hc=g.hc,S3=Math.sqrt(3)/3,t13=t*1.3;
+      for(let x=0;x<W;x++){const hx=x/20+t*0.5;hc[x]=Math.sin(Math.round(hx*2/3)*2+t);ex[x]=Math.abs(Math.sin((hx%1)*Math.PI));}
+      for(let y=0;y<H;y++){const hy=y/20+t*0.3;ey[y]=Math.abs(Math.sin((hy%1)*Math.PI));}
+      // cos(round(r2)*3+1.3t) only takes a few dozen values per frame
+      const hx0=t*0.5,hx1=(W-1)/20+t*0.5,hy0=t*0.3,hy1=(H-1)/20+t*0.3;
+      const kmin=Math.floor(-hx1/3+S3*hy0)-1,kmax=Math.ceil(-hx0/3+S3*hy1)+1;
+      const ck=src._hexCk&&src._hexCk.length>=kmax-kmin+1?src._hexCk:(src._hexCk=new Float32Array(kmax-kmin+8));
+      for(let k=kmin;k<=kmax;k++) ck[k-kmin]=Math.cos(k*3+t13);
+      for(let y=0,i=0;y<H;y++){
+        const hy=y/20+t*0.3,eyv=ey[y];
+        for(let x=0;x<W;x++,i++){
+          const hx=x/20+t*0.5;
+          const v=hc[x]*ck[Math.round(-hx/3+S3*hy)-kmin]*0.5+0.5;
+          const c=Math.round(v*255*(0.3+ex[x]*eyv*0.7));
+          u[i]=_px(c,Math.round(c*0.7),c*1.2>255?255:Math.round(c*1.2));
+        }
       }
+      ctx.putImageData(imgd,0,0);
       break;}
-    case 1:{ // starfield
+    case 1:{ // starfield (path drawing only — the unused ImageData is gone)
       if(!src.genState) src.genState=Array.from({length:200},()=>({x:(Math.random()-0.5)*2,y:(Math.random()-0.5)*2,z:Math.random()}));
       ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
       const spd=0.005+p.speed*0.04;
-      src.genState.forEach(star=>{
+      const stars=src.genState;
+      for(let k=0;k<stars.length;k++){
+        const star=stars[k];
         star.z-=spd;
         if(star.z<=0){star.x=(Math.random()-0.5)*2;star.y=(Math.random()-0.5)*2;star.z=1;}
         const px=(star.x/star.z)*W/2+W/2;
@@ -7543,37 +7849,34 @@ function renderPattern(src){
         const br=Math.round((1-star.z)*255);
         ctx.fillStyle='rgb('+br+','+br+','+br+')';
         ctx.fillRect(px,py,sz,sz);
-      });
-      return finishGenCanvas(src);}
-    case 5:{ // noise field (using perlin)
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        const n=perlinFbm(x/80+t*0.3,y/80+t*0.2,3,2,0.5);
-        const v=n*0.5+0.5;
-        const i=(y*W+x)*4;
-        d[i]=Math.round(Math.sin(v*Math.PI*3+t)*127+128);
-        d[i+1]=Math.round(Math.sin(v*Math.PI*3+t+2)*127+128);
-        d[i+2]=Math.round(v*255);
-        d[i+3]=255;
       }
       break;}
-    case 7:{ // vortex
-      const cx=W/2,cy=H/2;
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        const dx=x-cx,dy=y-cy;
-        const r=Math.sqrt(dx*dx+dy*dy);
-        const a=Math.atan2(dy,dx)+r/40-t*2;
-        const v=Math.sin(a*6)*0.5+0.5;
-        const i=(y*W+x)*4;
-        d[i]=Math.round(v*200);d[i+1]=Math.round(v*100);d[i+2]=Math.round((1-v)*255);d[i+3]=255;
+    case 5:{ // noise field (using perlin)
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32;
+      const PI3=Math.PI*3,ox=t*0.3,oy=t*0.2;
+      for(let y=0,i=0;y<H;y++)for(let x=0;x<W;x++,i++){
+        const n=perlinFbm(x/80+ox,y/80+oy,3,2,0.5);
+        const v=n*0.5+0.5;
+        u[i]=_px(_c8(Math.sin(v*PI3+t)*127+128),_c8(Math.sin(v*PI3+t+2)*127+128),_c8(v*255));
       }
+      ctx.putImageData(imgd,0,0);
+      break;}
+    case 7:{ // vortex — sin(6·(atan2+r/40) − 12t) via precomputed sin/cos
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32,g=_geo(W,H);
+      const vS=g.vS,vC=g.vC,cb=Math.cos(t*12),sb=Math.sin(t*12),L=_LUT_VORTEX,n=W*H;
+      for(let i=0;i<n;i++){
+        const v=(vS[i]*cb-vC[i]*sb)*0.5+0.5;
+        u[i]=L[(v*2047+0.5)|0];
+      }
+      ctx.putImageData(imgd,0,0);
       break;}
   }
-  if(p.preset!==1){ctx.putImageData(imgd,0,0);}
   return finishGenCanvas(src);
 }
 
 /* ── MATH PATTERNS (never-ending) ── */
 const MATH_T={};
+const _LORENZ_N=3000;
 function renderMath(src){
   const ctx=ensureGenCanvas(src);
   const p=src.genParam||{preset:0,speed:0.5};
@@ -7583,45 +7886,57 @@ function renderMath(src){
   const t=MATH_T[id];
   if(!src.genState) src.genState={};
   const st=src.genState;
-  const slot=src===sources.A?'A':'B';
   // run on main thread (worker disabled)
   const W=src.genCv.width,H=src.genCv.height; // use small canvas dims
 
   switch(p.preset){
     case 0:{ // lorenz attractor
-      if(!st.lx){st.lx=0.1;st.ly=0;st.lz=0;st.pts=[];st.hue=0;}
+      // ring buffer of x,z (was an array of arrays with shift() ×8 a frame)
+      if(!st.lp){st.lx=0.1;st.ly=0;st.lz=0;st.lp=new Float64Array(_LORENZ_N*2);st.ln=0;st.lh=0;}
       const sigma=10,rho=28,beta=8/3;
       const dt=0.004*(0.3+p.speed*2);
+      const lp=st.lp;
       for(let i=0;i<8;i++){
         const dx=sigma*(st.ly-st.lx);
         const dy=st.lx*(rho-st.lz)-st.ly;
         const dz=st.lx*st.ly-beta*st.lz;
         st.lx+=dx*dt;st.ly+=dy*dt;st.lz+=dz*dt;
-        st.pts.push([st.lx,st.ly,st.lz]);
-        if(st.pts.length>3000) st.pts.shift();
+        lp[st.lh*2]=st.lx;lp[st.lh*2+1]=st.lz;
+        st.lh=(st.lh+1)%_LORENZ_N;
+        if(st.ln<_LORENZ_N) st.ln++;
       }
       ctx.fillStyle='rgba(0,0,0,0.04)';ctx.fillRect(0,0,W,H);
       const scx=W*0.5,scy=H*0.5,sc=8;
       ctx.lineWidth=0.8;
-      const len=st.pts.length;
+      // one stroke per 3° hue run instead of 3000 beginPath/stroke + style parses
+      const styles=_hslaBuckets(100,60,0.7);
+      const len=st.ln,base=(st.lh-len+_LORENZ_N)%_LORENZ_N;
+      let cur=-1,j=base;
+      let px0=scx+lp[j*2]*sc,py0=scy-(lp[j*2+1]-25)*sc;
       for(let i=1;i<len;i++){
-        const hue=(i/len*360+t*20)%360;
-        ctx.strokeStyle='hsla('+hue+',100%,60%,0.7)';
-        ctx.beginPath();
-        ctx.moveTo(scx+st.pts[i-1][0]*sc,scy+(st.pts[i-1][2]-25)*sc*-1);
-        ctx.lineTo(scx+st.pts[i][0]*sc,scy+(st.pts[i][2]-25)*sc*-1);
-        ctx.stroke();
+        j=(base+i)%_LORENZ_N;
+        const x1=scx+lp[j*2]*sc,y1=scy-(lp[j*2+1]-25)*sc;
+        const b=(((i/len*360+t*20)%360)/3)|0;
+        if(b!==cur){
+          if(cur>=0) ctx.stroke();
+          cur=b;ctx.strokeStyle=styles[b];ctx.beginPath();ctx.moveTo(px0,py0);
+        }
+        ctx.lineTo(x1,y1);
+        px0=x1;py0=y1;
       }
+      if(cur>=0) ctx.stroke();
       break;}
     case 1:{ // de jong attractor — parameters drift slowly, never repeats
-      if(!st.djp){st.djp=[0,0];st.dja=1.4;st.djb=-2.3;st.djc=2.4;st.djd=-2.1;}
+      if(!st.djp){st.djp=[0,0];}
+      const n=1200;
+      if(!st.djx){st.djx=new Float32Array(n);st.djy=new Float32Array(n);st.djb=new Uint8Array(n);st.cnt=new Int32Array(121);st.ord=new Int32Array(n);}
       const da=1.2+Math.sin(t*0.031)*1.6;
       const db=-2.0+Math.cos(t*0.027)*0.8;
       const dc=2.2+Math.sin(t*0.019)*0.9;
       const dd=-2.0+Math.cos(t*0.023)*0.8;
       ctx.fillStyle='rgba(0,0,0,0.025)';ctx.fillRect(0,0,W,H);
-      let [px,py]=st.djp;
-      const n=1200;
+      let px=st.djp[0],py=st.djp[1],m=0;
+      const xs=st.djx,ys=st.djy,bk=st.djb;
       for(let i=0;i<n;i++){
         const nx=Math.sin(da*py)-Math.cos(db*px);
         const ny=Math.sin(dc*px)-Math.cos(dd*py);
@@ -7630,29 +7945,33 @@ function renderMath(src){
         const sy=Math.round((py+2.5)/5*H);
         if(sx>=0&&sx<W&&sy>=0&&sy<H){
           const hue=(Math.atan2(py,px)/Math.PI*180+t*10+360)%360;
-          ctx.fillStyle='hsla('+hue+',100%,70%,0.2)';
-          ctx.fillRect(sx,sy,1,1);
+          xs[m]=sx;ys[m]=sy;bk[m]=(hue/3)|0;m++;
         }
       }
-      st.djp=[px,py];
+      st.djp[0]=px;st.djp[1]=py;
+      _fillBucketed(ctx,_hslaBuckets(100,70,0.2),xs,ys,bk,m,1,1,st.cnt,st.ord);
       break;}
     case 2:{ // ikeda map — chaotic laser dynamics, never settles
-      if(!st.ipts){st.ipts=[];for(let i=0;i<400;i++)st.ipts.push([Math.random()*2-1,Math.random()*2-1]);}
+      const n=400;
+      if(!st.ip){st.ip=new Float64Array(n*2);for(let i=0;i<n*2;i++)st.ip[i]=Math.random()*2-1;st.ix=new Float32Array(n);st.iy=new Float32Array(n);st.ib=new Uint8Array(n);st.cnt=new Int32Array(121);st.ord=new Int32Array(n);}
       const u=0.6+p.speed*0.4;
       ctx.fillStyle='rgba(0,0,0,0.04)';ctx.fillRect(0,0,W,H);
-      st.ipts=st.ipts.map(([px,py])=>{
+      const ip=st.ip,xs=st.ix,ys=st.iy,bk=st.ib;let m=0;
+      for(let i=0;i<n;i++){
+        const px=ip[i*2],py=ip[i*2+1];
         const tau=0.4-6/(1+px*px+py*py);
-        const nx=1+u*(px*Math.cos(tau)-py*Math.sin(tau));
-        const ny=u*(px*Math.sin(tau)+py*Math.cos(tau));
+        const ct=Math.cos(tau),s=Math.sin(tau);
+        const nx=1+u*(px*ct-py*s);
+        const ny=u*(px*s+py*ct);
         const sx=Math.round((nx+3)/6*W);
         const sy=Math.round((ny+3)/6*H);
         if(sx>=0&&sx<W&&sy>=0&&sy<H){
           const hue=(Math.atan2(ny,nx)/Math.PI*180+t*8+360)%360;
-          ctx.fillStyle='hsla('+hue+',90%,65%,0.25)';
-          ctx.fillRect(sx,sy,1.5,1.5);
+          xs[m]=sx;ys[m]=sy;bk[m]=(hue/3)|0;m++;
         }
-        return[nx,ny];
-      });
+        ip[i*2]=nx;ip[i*2+1]=ny;
+      }
+      _fillBucketed(ctx,_hslaBuckets(90,65,0.25),xs,ys,bk,m,1.5,1.5,st.cnt,st.ord);
       break;}
     case 3:{ // lissajous — parametric curves, drift ratios over time
       ctx.fillStyle='rgba(0,0,0,0.06)';ctx.fillRect(0,0,W,H);
@@ -7664,7 +7983,6 @@ function renderMath(src){
         const theta=(i/n2)*Math.PI*2;
         const x=(Math.sin(a*theta+delta)*0.45+0.5)*W;
         const y=(Math.sin(b2*theta)*0.45+0.5)*H;
-        const hue=(i/n2*360+t*30)%360;
         if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
       }
       ctx.strokeStyle='hsla('+(t*40%360)+',100%,65%,0.6)';
@@ -7677,116 +7995,153 @@ function renderMath(src){
         st.vtick=0;
       }
       st.vtick+=0.016*(0.2+p.speed);
+      const cells=st.vcells;
       // move cells
-      st.vcells.forEach(c=>{
+      for(const c of cells){
         c.x+=c.vx;c.y+=c.vy;
         if(c.x<0||c.x>W)c.vx*=-1;
         if(c.y<0||c.y>H)c.vy*=-1;
         c.hue=(c.hue+0.3)%360;
-      });
+      }
       // spawn new cell occasionally
-      if(st.vcells.length<48&&Math.random()<0.008*(0.2+p.speed)){
-        const parent=st.vcells[Math.floor(Math.random()*st.vcells.length)];
-        st.vcells.push({x:parent.x+(Math.random()-0.5)*40,y:parent.y+(Math.random()-0.5)*40,vx:(Math.random()-0.5)*0.8,vy:(Math.random()-0.5)*0.8,hue:(parent.hue+60+Math.random()*60)%360});
+      if(cells.length<48&&Math.random()<0.008*(0.2+p.speed)){
+        const parent=cells[Math.floor(Math.random()*cells.length)];
+        cells.push({x:parent.x+(Math.random()-0.5)*40,y:parent.y+(Math.random()-0.5)*40,vx:(Math.random()-0.5)*0.8,vy:(Math.random()-0.5)*0.8,hue:(parent.hue+60+Math.random()*60)%360});
       }
-      const imgd=ctx.createImageData(W,H);const d=imgd.data;
-      for(let y=0;y<H;y+=2)for(let x=0;x<W;x+=2){
-        let minD=1e9,minI=0,secD=1e9;
-        st.vcells.forEach((c,i)=>{
-          const dist=(x-c.x)**2+(y-c.y)**2;
-          if(dist<minD){secD=minD;minD=dist;minI=i;}
-          else if(dist<secD)secD=dist;
-        });
-        const edge=Math.sqrt(secD)-Math.sqrt(minD);
-        const bright=edge<3?255:150;
-        const h=st.vcells[minI].hue;
-        const [r2,g2,b2]=hsl2rgb(h,0.8,bright/510);
-        for(let dy=0;dy<2;dy++)for(let dx=0;dx<2;dx++){
-          const i=((y+dy)*W+(x+dx))*4;
-          d[i]=r2;d[i+1]=g2;d[i+2]=b2;d[i+3]=255;
-        }
+      // per-cell colours once per frame (edge / fill), flat coordinate arrays
+      const nc=cells.length;
+      if(!st.vbuf||st.vbuf.length<nc*2){st.vbuf=new Float64Array(96);st.vcol=new Uint32Array(96);}
+      const cp=st.vbuf,col=st.vcol;
+      for(let i=0;i<nc;i++){
+        const c=cells[i];cp[i*2]=c.x;cp[i*2+1]=c.y;
+        let h=_hsl(c.hue,0.8,255/510);col[i*2]=_px(h[0],h[1],h[2]);
+        h=_hsl(c.hue,0.8,150/510);col[i*2+1]=_px(h[0],h[1],h[2]);
       }
-      ctx.putImageData(imgd,0,0);
-      break;}
-    case 5:{ // newton fractal — basin boundaries shift as root targets rotate
-      const roots=[[Math.cos(t*0.05),Math.sin(t*0.05)],[Math.cos(t*0.05+2.09),Math.sin(t*0.05+2.09)],[Math.cos(t*0.05+4.19),Math.sin(t*0.05+4.19)]];
-      const colors=[[255,80,80],[80,255,80],[80,80,255]];
-      const imgd=ctx.createImageData(W,H);const dArr=imgd.data;
-      const maxIter=20;const tol=0.001;const scale=1.6;
-      for(let y=0;y<H;y+=2)for(let x=0;x<W;x+=2){
-        let zr=(x/W-0.5)*scale*2,zi=(y/H-0.5)*scale*2*(H/W);
-        let iter=0,rootIdx=0;
-        for(;iter<maxIter;iter++){
-          const r2=zr*zr+zi*zi,r4=(zr*zr+zi*zi)**2||1e-10;
-          const zr2=zr*zr-zi*zi,zi2=2*zr*zi;
-          const zr3=zr2*zr-zi2*zi,zi3=zr2*zi+zi2*zr;
-          const denom=(3*(zr2+zi2))||1e-10;
-          zr-=(zr3-1)/denom;
-          zi-=zi3/denom;
-          let minD=1e9;
-          roots.forEach((r,i)=>{const d=(zr-r[0])**2+(zi-r[1])**2;if(d<minD){minD=d;rootIdx=i;}});
-          if(minD<tol) break;
-        }
-        const bright=Math.round((1-iter/maxIter)*255);
-        const [rr,gg,bb]=colors[rootIdx];
-        for(let dy=0;dy<2;dy++)for(let dx=0;dx<2;dx++){
-          const i=((y+dy)*W+(x+dx))*4;
-          dArr[i]=Math.round(rr*bright/255);dArr[i+1]=Math.round(gg*bright/255);dArr[i+2]=Math.round(bb*bright/255);dArr[i+3]=255;
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32;
+      for(let y=0;y<H;y+=2){
+        const y1=y+1<H;
+        for(let x=0;x<W;x+=2){
+          let minD=1e9,minI=0,secD=1e9;
+          for(let i=0;i<nc;i++){
+            const dx=x-cp[i*2],dy=y-cp[i*2+1],dist=dx*dx+dy*dy;
+            if(dist<minD){secD=minD;minD=dist;minI=i;}
+            else if(dist<secD)secD=dist;
+          }
+          const c=col[minI*2+(Math.sqrt(secD)-Math.sqrt(minD)<3?0:1)];
+          // 2×2 block, clipped (odd gen width used to wrap into the next row)
+          const i0=y*W+x;
+          u[i0]=c;if(x+1<W)u[i0+1]=c;
+          if(y1){u[i0+W]=c;if(x+1<W)u[i0+W+1]=c;}
         }
       }
       ctx.putImageData(imgd,0,0);
       break;}
-    case 6:{ // mandelbrot zoom — slow automated zoom to interesting point
-      if(!st.mzx){st.mzx=-0.7436447860;st.mzy=0.1318252536;st.mzoom=0.5;st.mangle=0;}
-      st.mzoom*=(1+0.002*(0.3+p.speed));
-      const imgd=ctx.createImageData(W,H);const d=imgd.data;
-      const maxIter=80;const scale=3.5/st.mzoom;
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        const cr=st.mzx+(x/W-0.5)*scale;
-        const ci=st.mzy+(y/H-0.5)*scale*(H/W);
-        let zr=0,zi=0,iter=0;
-        while(zr*zr+zi*zi<4&&iter<maxIter){
-          const tmp=zr*zr-zi*zi+cr;zi=2*zr*zi+ci;zr=tmp;iter++;
+    case 5:{ // newton fractal for z³ = c, c = e^{3iθ}: the three roots rotate
+      // with θ, so the basins turn. (the old step divided by a real scalar
+      // and its root targets never rotated with the iteration)
+      const th=t*0.05,TAU3=Math.PI*2/3;
+      const c3r=Math.cos(3*th),c3i=Math.sin(3*th);
+      const r0r=Math.cos(th),r0i=Math.sin(th),r1r=Math.cos(th+TAU3),r1i=Math.sin(th+TAU3),r2r=Math.cos(th+2*TAU3),r2i=Math.sin(th+2*TAU3);
+      const maxIter=20,tol=0.001,scale=1.6;
+      if(!st.nlut){
+        st.nlut=new Uint32Array(3*(maxIter+1));
+        const colors=[[255,80,80],[80,255,80],[80,80,255]];
+        for(let r=0;r<3;r++)for(let it=0;it<=maxIter;it++){
+          const bright=Math.round((1-it/maxIter)*255),cc=colors[r];
+          st.nlut[r*(maxIter+1)+it]=_px(Math.round(cc[0]*bright/255),Math.round(cc[1]*bright/255),Math.round(cc[2]*bright/255));
         }
-        const i=(y*W+x)*4;
-        if(iter===maxIter){d[i]=0;d[i+1]=0;d[i+2]=0;}
-        else{
-          const n=iter/maxIter;
-          d[i]=Math.round(n*255);
-          d[i+1]=Math.round(Math.sin(n*Math.PI*3)*255);
-          d[i+2]=Math.round((1-n)*255);
+      }
+      const L=st.nlut;
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32;
+      for(let y=0;y<H;y+=2){
+        const y1=y+1<H;
+        for(let x=0;x<W;x+=2){
+          let zr=(x/W-0.5)*scale*2,zi=(y/H-0.5)*scale*2*(H/W);
+          let iter=0,rootIdx=0;
+          for(;iter<maxIter;iter++){
+            // z ← z − (z³ − c) / (3z²), full complex division
+            const zr2=zr*zr-zi*zi,zi2=2*zr*zi;
+            const nr=zr2*zr-zi2*zi-c3r,ni=zr2*zi+zi2*zr-c3i;
+            const dr=3*zr2,di=3*zi2,den=(dr*dr+di*di)||1e-20;
+            zr-=(nr*dr+ni*di)/den;
+            zi-=(ni*dr-nr*di)/den;
+            let a=zr-r0r,b=zi-r0i,minD=a*a+b*b;rootIdx=0;
+            a=zr-r1r;b=zi-r1i;let d=a*a+b*b;if(d<minD){minD=d;rootIdx=1;}
+            a=zr-r2r;b=zi-r2i;d=a*a+b*b;if(d<minD){minD=d;rootIdx=2;}
+            if(minD<tol) break;
+          }
+          const c=L[rootIdx*(maxIter+1)+iter];
+          const i0=y*W+x;
+          u[i0]=c;if(x+1<W)u[i0+1]=c;
+          if(y1){u[i0+W]=c;if(x+1<W)u[i0+W+1]=c;}
         }
-        d[i+3]=255;
+      }
+      ctx.putImageData(imgd,0,0);
+      break;}
+    case 6:{ // mandelbrot zoom — into a boundary point (seahorse valley) and
+      // back out: zoom used to grow forever, going blocky and then black once
+      // the 80-iteration budget couldn't resolve the boundary any more
+      if(!st.mzx||!st.mdir){st.mzx=-0.743643887037151;st.mzy=0.131825904205330;st.mzoom=0.5;st.mangle=0;st.mdir=1;}
+      const ZMAX=2000;
+      st.mzoom*=(1+0.002*(0.3+p.speed)*st.mdir);
+      if(st.mzoom>=ZMAX){st.mzoom=ZMAX;st.mdir=-1;}
+      else if(st.mzoom<=0.5){st.mzoom=0.5;st.mdir=1;}
+      // iteration budget grows with depth so the boundary stays detailed
+      const maxIter=Math.min(150,80+Math.round(Math.log10(st.mzoom/0.5)*24));
+      if(!st.mlut||st.mlutN!==maxIter){
+        st.mlut=new Uint32Array(maxIter+1);st.mlutN=maxIter;
+        for(let it=0;it<maxIter;it++){const n=it/maxIter;st.mlut[it]=_px(Math.round(n*255),_c8(Math.sin(n*Math.PI*3)*255),Math.round((1-n)*255));}
+        st.mlut[maxIter]=_px(0,0,0);
+      }
+      const L=st.mlut;
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32;
+      const scale=3.5/st.mzoom,sy=scale*(H/W);
+      // interlaced: alternate rows each frame once a full frame exists — the
+      // zoom moves ~0.1%/frame so it doesn't show, and deep frames cost half
+      const full=st.mimg!==imgd;st.mimg=imgd;st.mfr=(st.mfr+1)|0;
+      const y0=full?0:(st.mfr&1),ys=full?1:2;
+      for(let y=y0;y<H;y+=ys){
+        const ci=st.mzy+(y/H-0.5)*sy;
+        for(let x=0,i=y*W;x<W;x++,i++){
+          const cr=st.mzx+(x/W-0.5)*scale;
+          let iter=0;
+          // main cardioid / period-2 bulb are inside: skip the full budget
+          const q=(cr-0.25)*(cr-0.25)+ci*ci;
+          if(q*(q+(cr-0.25))<=0.25*ci*ci||(cr+1)*(cr+1)+ci*ci<=0.0625) iter=maxIter;
+          else{
+            let zr=0,zi=0,zr2=0,zi2=0;
+            while(zr2+zi2<4&&iter<maxIter){zi=2*zr*zi+ci;zr=zr2-zi2+cr;zr2=zr*zr;zi2=zi*zi;iter++;}
+          }
+          u[i]=L[iter];
+        }
       }
       ctx.putImageData(imgd,0,0);
       break;}
     case 7:{ // julia set — c parameter drifts through parameter space
       const cr=0.7885*Math.cos(t*0.1);
       const ci=0.7885*Math.sin(t*0.1);
-      const imgd=ctx.createImageData(W,H);const d=imgd.data;
       const maxIter=64;
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        let zr=(x/W-0.5)*3.5,zi=(y/H-0.5)*2;
-        let iter=0;
-        while(zr*zr+zi*zi<4&&iter<maxIter){
-          const tmp=zr*zr-zi*zi+cr;
-          zi=2*zr*zi+ci;zr=tmp;iter++;
+      // palette depends only on the iteration count: 65 entries per frame
+      if(!st.jlut) st.jlut=new Uint32Array(maxIter+1);
+      const L=st.jlut;
+      for(let it=0;it<maxIter;it++){const n=it/maxIter;L[it]=_px(Math.round(Math.sin(n*Math.PI*4+t)*127+128),Math.round(Math.sin(n*Math.PI*4+t+2.1)*127+128),Math.round(Math.sin(n*Math.PI*4+t+4.2)*127+128));}
+      L[maxIter]=_px(0,0,0);
+      const imgd=_genImg(src,ctx,W,H),u=src._genU32;
+      for(let y=0,i=0;y<H;y++){
+        const zi0=(y/H-0.5)*2;
+        for(let x=0;x<W;x++,i++){
+          let zr=(x/W-0.5)*3.5,zi=zi0;
+          let iter=0,zr2=zr*zr,zi2=zi*zi;
+          while(zr2+zi2<4&&iter<maxIter){zi=2*zr*zi+ci;zr=zr2-zi2+cr;zr2=zr*zr;zi2=zi*zi;iter++;}
+          u[i]=L[iter];
         }
-        const i=(y*W+x)*4;
-        if(iter===maxIter){d[i]=0;d[i+1]=0;d[i+2]=0;}
-        else{
-          const n=iter/maxIter;
-          d[i]=Math.round(Math.sin(n*Math.PI*4+t)*127+128);
-          d[i+1]=Math.round(Math.sin(n*Math.PI*4+t+2.1)*127+128);
-          d[i+2]=Math.round(Math.sin(n*Math.PI*4+t+4.2)*127+128);
-        }
-        d[i+3]=255;
       }
       ctx.putImageData(imgd,0,0);
       break;}
   }
   return finishGenCanvas(src);
 }
+
 
 /* ── ARCHIVE VIDEO LOADER ── */
 const _PROXY='https://morphproxy.spaceagedesignlabs.workers.dev/proxy/';
@@ -7818,7 +8173,9 @@ const _ARCHIVE_MSGS=[
   'converting magnetic memories to light',
   'time base correcting',
 ];
-async function loadArchiveVideo(src,slot,url){
+async function loadArchiveVideo(src,slot,url,tok){
+  if(tok===undefined) tok=++_loadTok[slot];
+  if(_loadTok[slot]!==tok) return; // superseded while the URL was resolving
   clearTimeout(setStatus._t);
   setStatus._noReset=true;
 
@@ -7898,9 +8255,9 @@ async function loadArchiveVideo(src,slot,url){
   },4000);
   setStatus(_shuffled[0]);_msgIdx=1;
 
-  // Set type immediately so getSourceCanvas routes correctly when video fires canplay
-  src.type='url';
-
+  // the slot keeps playing its current source until this video is ready;
+  // only then is the old one released (a failed/cancelled load used to
+  // leave the slot half-cleared, or black)
   const vid=makeVideoEl();
   // Route through our Cloudflare Worker proxy which adds Access-Control-Allow-Origin: *
   // This solves the archive.org CDN redirect dropping CORS headers.
@@ -7908,20 +8265,26 @@ async function loadArchiveVideo(src,slot,url){
   vid.crossOrigin='anonymous';
   vid.loop=true;
   vid.addEventListener('ended',()=>{vid.currentTime=0;vid.play().catch(()=>{});});
-  src.vidEl=vid;
-  src.vid2El=null;
   const _proxiedUrl=_PROXY+encodeURIComponent(url);
   vid.src=_proxiedUrl;vid.load();vid.play().catch(()=>{});
 
   // mark slot active only once video is actually ready
-  let _activated=false;
+  let _activated=false,_done=false;
   let _watchdog=null; // declared before _onReady to avoid TDZ
-  function _onReady(){
-    if(_activated) return;
-    _activated=true;
-    clearInterval(_msgIv);
+  function _finish(){
+    _done=true;
+    clearInterval(_msgIv);clearInterval(_watchdog);
     setStatus._noReset=false;
-    if(_watchdog) clearInterval(_watchdog);
+  }
+  function _dropVid(){vid.pause();vid.removeAttribute('src');try{vid.load();}catch(e){}vid.remove();}
+  function _onReady(){
+    if(_activated||_done) return;
+    // something else was loaded into this slot meanwhile — discard quietly
+    if(_loadTok[slot]!==tok){_finish();_dropVid();_removeOverlay();return;}
+    _activated=true;
+    _finish();
+    _commitSource(slot);
+    src.type='url';src.vidEl=vid;src.vid2El=null;
     src.active=true;src.label='archive';
     updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
     _removeOverlay();
@@ -7933,58 +8296,48 @@ async function loadArchiveVideo(src,slot,url){
   // recover from stalls — archive.org range requests can fail mid-stream
   vid.addEventListener('stalled',()=>{
     if(!_activated) return;
-    setTimeout(()=>{ if(vid.paused||vid.readyState<2){ vid.load(); vid.play().catch(()=>{}); } },1000);
+    setTimeout(()=>{ if(src.vidEl===vid&&(vid.paused||vid.readyState<2)){ vid.load(); vid.play().catch(()=>{}); } },1000);
   });
   vid.addEventListener('waiting',()=>{
     if(!_activated) return;
-    setTimeout(()=>{ if(vid.paused){ vid.play().catch(()=>{}); } },500);
+    setTimeout(()=>{ if(src.vidEl===vid&&vid.paused){ vid.play().catch(()=>{}); } },500);
   });
 
   // watchdog — check every 2s, give up at 30s
   let _waited=0;
   _watchdog=setInterval(()=>{
     _waited+=2;
+    if(_loadTok[slot]!==tok){_finish();_dropVid();_removeOverlay();return;}
     if(vid.readyState>=2||vid.videoWidth>0){
       _onReady();
       return;
     }
     if(_waited>=30){
-      clearInterval(_watchdog);
-      clearInterval(_msgIv);
-      setStatus._noReset=false;
+      // tear the hidden video down (it kept downloading and a late canplay
+      // activated a half-cleared slot); the previous source stays untouched
+      _finish();
+      _dropVid();
       _showOverlayError('archive.org is currently down.','please pick another source.');
-      src.active=false;
-      src.type=null;
-      updatePreview(slot);updateSrcNodeControls(slot);updateSourcesAccordion();
-      setStatus._cap=false;
+      updateSourcePickState();
       setStatus('archive.org is down — pick another source');
-      setStatus._cap=true;
     }
   },2000);
-
-  src.label='loading…';
-  updateSrcNodeControls(slot);
 }
 
 /* ── ARCHIVE.ORG RESOLVER ── */
 /* ── VIDEOS BROWSER ── */
-const _VB_PROXIES=[
-  u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
-  u=>'https://corsproxy.io/?'+encodeURIComponent(u),
-  u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u),
-];
-
+// archive.org's advancedsearch and metadata APIs send
+// Access-Control-Allow-Origin: * — fetch them directly. (the old fallbacks
+// sent user URLs through allorigins / corsproxy.io / codetabs)
+const _sig=ms=>(typeof AbortSignal!=='undefined'&&AbortSignal.timeout)?AbortSignal.timeout(ms):undefined;
 async function _vbFetch(url){
-  // archive.org search API supports CORS — try direct first
-  try{const r=await fetch(url,{signal:AbortSignal.timeout(8000)});if(r.ok) return await r.json();}catch(e){}
-  // fall back to proxies
-  for(const pf of _VB_PROXIES){
-    try{const r=await fetch(pf(url),{signal:AbortSignal.timeout(8000)});if(r.ok) return await r.json();}catch(e){}
-  }
-  throw new Error('all proxies failed');
+  const r=await fetch(url,{signal:_sig(8000)});
+  if(!r.ok) throw new Error('archive.org search failed ('+r.status+')');
+  return await r.json();
 }
 
-function openVideosBrowser(slot,src){
+function openVideosBrowser(slot,src,tok){
+  if(tok===undefined) tok=_loadTok[slot];
   const isDark=document.body.classList.contains('dark');
   const modal=document.createElement('div');
   modal.id='vb-modal';
@@ -8019,18 +8372,20 @@ function openVideosBrowser(slot,src){
 
   const statusEl=modal.querySelector('#vb-status');
   const resultsEl=modal.querySelector('#vb-results');
-  let _loading=false;
+  let _loading=false,_closed=false;
   function setVBStatus(msg){ statusEl.textContent=msg; }
 
+  function escVB(e){ if(e.key==='Escape') close(); }
   function close(){
+    if(_closed) return;
+    _closed=true;
+    document.removeEventListener('keydown',escVB);
     modal.remove();
     if(!src.active) updateSourcePickState();
   }
 
   modal.querySelector('#vb-close').onclick=close;
-  document.addEventListener('keydown',function escVB(e){
-    if(e.key==='Escape'){close();document.removeEventListener('keydown',escVB);}
-  });
+  document.addEventListener('keydown',escVB);
 
   function renderResults(items){
     resultsEl.innerHTML='';
@@ -8041,15 +8396,18 @@ function openVideosBrowser(slot,src){
     items.forEach(item=>{
       const card=document.createElement('div');
       card.style.cssText='border:2px solid #000;cursor:pointer;background:#000;display:flex;flex-direction:column;overflow:hidden;';
-      const thumb=`https://archive.org/services/img/${item.identifier}`;
-      const title=(item.title||item.identifier).substring(0,40);
+      const title=String(item.title||item.identifier).substring(0,40);
+      // static markup only — identifier/title come from archive.org and are
+      // set via src/textContent, never interpolated into HTML
       card.innerHTML=`
         <div style="width:100%;aspect-ratio:16/9;background:#000;overflow:hidden;position:relative;flex-shrink:0;">
-          <img src="${thumb}" style="width:100%;height:100%;object-fit:cover;display:block;" loading="lazy" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='flex'"/>
+          <img style="width:100%;height:100%;object-fit:cover;display:block;" loading="lazy" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='flex'"/>
           <div style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;background:#111;font-size:24px;color:#fff;">▶</div>
         </div>
-        <div class="vb-name" style="padding:5px 6px 6px;font-family:'Departure Mono','VT323',monospace;font-size:12px;color:#fff;line-height:1.25;background:#000;">${title}</div>
+        <div class="vb-name" style="padding:5px 6px 6px;font-family:'Departure Mono','VT323',monospace;font-size:12px;color:#fff;line-height:1.25;background:#000;"></div>
       `;
+      card.querySelector('img').src='https://archive.org/services/img/'+encodeURIComponent(item.identifier);
+      card.querySelector('.vb-name').textContent=title;
       card.onmouseenter=()=>{ card.style.outline='3px solid #000'; card.style.outlineOffset='-3px'; };
       card.onmouseleave=()=>{ card.style.outline=''; };
       card.onclick=()=>{
@@ -8058,11 +8416,12 @@ function openVideosBrowser(slot,src){
         // lock the close button
         const closeBtn=modal.querySelector('#vb-close');
         if(closeBtn){closeBtn.style.pointerEvents='none';closeBtn.style.opacity='0.3';}
-        resolveVideoUrl('https://archive.org/details/'+item.identifier).then(url=>{
-          if(!url){setVBStatus('no video found.');resultsEl.style.pointerEvents='';if(closeBtn){closeBtn.style.pointerEvents='';closeBtn.style.opacity='';}return;}
+        const unlock=()=>{resultsEl.style.pointerEvents='';if(closeBtn){closeBtn.style.pointerEvents='';closeBtn.style.opacity='';}};
+        resolveVideoUrl('https://archive.org/details/'+encodeURIComponent(item.identifier)).then(url=>{
+          if(!url){setVBStatus('no video found.');unlock();return;}
           close();
-          loadArchiveVideo(src,slot,url);
-        }).catch(e=>{setVBStatus('error: '+e.message);resultsEl.style.pointerEvents='';});
+          loadArchiveVideo(src,slot,url,tok);
+        }).catch(e=>{setVBStatus('error: '+e.message);unlock();});
       };
       resultsEl.appendChild(card);
     });
@@ -8464,7 +8823,7 @@ function openVideosBrowser(slot,src){
     _loading=false;
   }
 
-  modal.querySelector('#vb-refresh').onclick=loadRandom;
+  modal.querySelector('#vb-refresh').onclick=()=>loadRandom(); // as a bare handler it got the MouseEvent as retryCount
   loadRandom();
 }
 
@@ -8479,31 +8838,27 @@ async function resolveVideoUrl(url){
     setStatus('locating the goods at archive.org: '+id);
     try{
       const metaUrl='https://archive.org/metadata/'+id;
-      let res=null;
-      // try direct first — archive.org metadata has CORS headers
-      try{const r=await fetch(metaUrl);if(r.ok) res=r;}catch(e){}
-      if(!res){
-        const metaProxies=[
-          'https://api.allorigins.win/raw?url='+encodeURIComponent(metaUrl),
-          'https://corsproxy.io/?'+encodeURIComponent(metaUrl),
-          'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(metaUrl),
-        ];
-        for(const p of metaProxies){
-          try{const r=await fetch(p);if(r.ok){res=r;break;}}catch(e){}
-        }
-      }
-      if(!res) throw new Error('all proxies failed for metadata');
+      const res=await fetch(metaUrl,{signal:_sig(15000)});
+      if(!res.ok) throw new Error('metadata request failed ('+res.status+')');
       const data=await res.json();
       const files=data.files||[];
       setStatus('found the stash. picking the best quality...');
       // accept any common video format
       const isVideo=f=>/\.(mp4|webm|ogv|ogg|mpeg|mpg|avi|mov|m4v|mkv)$/i.test(f.name);
-      // prefer derivatives (re-encoded), then originals
-      const derivatives=files.filter(f=>isVideo(f)&&f.source==='derivative').sort((a,b)=>(+b.size||0)-(+a.size||0));
-      const originals=files.filter(f=>isVideo(f)&&f.source!=='derivative').sort((a,b)=>(+b.size||0)-(+a.size||0));
-      const allVideo=[...derivatives,...originals];
-      // last resort: any file with video-like name
-      const anyVideo=allVideo.length?allVideo:files.filter(f=>isVideo(f));
+      // biggest-file-wins picked multi-GB originals / .avi / .mkv the browser
+      // can't play. prefer h.264 .mp4 derivatives, only formats this browser
+      // plays, and the best one under ~250MB
+      const probe=document.createElement('video');
+      const mimeOf=n=>/\.(mp4|m4v)$/i.test(n)?'video/mp4':/\.webm$/i.test(n)?'video/webm':/\.(ogv|ogg)$/i.test(n)?'video/ogg':/\.mov$/i.test(n)?'video/quicktime':'';
+      const playable=f=>{const m=mimeOf(f.name);return !!m&&probe.canPlayType(m)!=='';};
+      const isH264=f=>/h\.?264|mpeg4/i.test(f.format||'')||/\.(mp4|m4v)$/i.test(f.name);
+      const mp4d=f=>f.source==='derivative'&&/\.mp4$/i.test(f.name);
+      const rank=f=>(mp4d(f)&&/h\.?264/i.test(f.format||''))?0:(mp4d(f)&&isH264(f))?1:isH264(f)?2:3;
+      const CAP=250*1024*1024,sz=f=>+f.size||0,fits=f=>sz(f)>0&&sz(f)<=CAP;
+      const cands=files.filter(f=>f&&f.name&&isVideo(f)&&playable(f)).sort((a,b)=>
+        rank(a)-rank(b)||(fits(b)-fits(a))||(fits(a)?sz(b)-sz(a):sz(a)-sz(b)));
+      // last resort: smallest file with a video-like name
+      const anyVideo=cands.length?cands:files.filter(f=>f&&f.name&&isVideo(f)).sort((a,b)=>sz(a)-sz(b));
       if(anyVideo.length){
         const file=anyVideo[0];
         const direct=`https://archive.org/download/${id}/${encodeURIComponent(file.name)}`;
@@ -8514,7 +8869,7 @@ async function resolveVideoUrl(url){
       const sample=files.slice(0,5).map(f=>f.name).join(', ');
       throw new Error('no video files found. available: '+sample);
     }catch(e){
-      throw new Error('archive.org fetch failed: '+e.message);
+      throw new Error('archive.org fetch failed: '+(e.name==='TimeoutError'?'timed out':e.message));
     }
   }
 
@@ -8538,6 +8893,8 @@ function snapshotBank(){
   return{
     xfade:state.xfade,
     modules:state.modules.map(m=>({
+      // id is kept so relinkTargets can map LFO/XY targets onto the new modules
+      id:m.id,
       name:m.name,type:m.type,color:m.color,
       activeFx:m.activeFx,
       activeFxQueue:m.activeFxQueue?[...m.activeFxQueue]:[],
@@ -8555,7 +8912,9 @@ function snapshotBank(){
   };
 }
 
+let _bankSwitching=false;
 function autoSave(){
+  if(_bankSwitching) return;
   banks[activeBank]=snapshotBank();
 }
 
@@ -8575,6 +8934,7 @@ function selectBank(key){
   setStatus('bank '+key+' selected — press enter to switch');
 }
 
+let _bankIdN=0;
 function confirmBank(){
   if(!pendingBank) return;
   // save current state into active bank
@@ -8591,18 +8951,23 @@ function confirmBank(){
   });
   const be2=document.getElementById('bank-enter');
   if(be2) be2.classList.remove('ready');
-  // restore bank state if it exists
   const snap=banks[activeBank];
-  if(snap){
-    setXfade(snap.xfade);
-    document.getElementById('mxf').value=snap.xfade;
-    state.modules=snap.modules.map(m=>{
-      const mod={
-        id:'m'+Date.now()+Math.random(),
+  // release the outgoing modules the same way the × button does (canvases,
+  // buffers, audio); rebuild/autosave are held until the new chain is in
+  _bankSwitching=true;
+  try{
+    state.modules.slice().forEach(m=>removeModule(m.id));
+    state.modules=[];
+    if(snap){
+      setXfade(snap.xfade);
+      document.getElementById('mxf').value=snap.xfade;
+      state.modules=snap.modules.map(m=>({
+        // no '.' in ids (they end up in CSS selectors)
+        id:'m'+Date.now().toString(36)+'b'+(++_bankIdN),
         name:m.name,type:m.type,color:m.color,
         cv:null,offscreen:null,offCtx:null,
         activeFx:m.activeFx,
-        activeFxQueue:[...m.activeFxQueue],
+        activeFxQueue:[...(m.activeFxQueue||[])],
         intensity:m.intensity,param:m.param,
         open:m.open,enabled:m.enabled,
         lfoTarget:m.lfoTarget?{...m.lfoTarget}:null,
@@ -8613,44 +8978,34 @@ function confirmBank(){
         seqPresets:m.seqPresets?m.seqPresets.map(p=>[...p]):null,
         channelGain:m.channelGain?{...m.channelGain}:null,
         geomAngle:m.geomAngle||0
-      };
-      return mod;
-    });
-    rebuildSlots();
-    // re-link lfoTargets by name since IDs changed
-    relinkTargets(snap.modules,state.modules);
-    setStatus('switched to bank '+activeBank);
-  } else {
-    // empty bank — clear chain
-    state.modules=[];
-    rebuildSlots();
-    setStatus('bank '+activeBank+' — empty');
-  }
+      }));
+      // re-link modulator targets since IDs changed
+      relinkTargets(snap.modules,state.modules);
+    }
+  }finally{_bankSwitching=false;}
+  rebuildSlots();
+  if(typeof updateCapState==='function') updateCapState();
+  setStatus(snap?'switched to bank '+activeBank:'bank '+activeBank+' — empty');
 }
 
 function relinkTargets(snapMods,newMods){
-  // snap and new modules are in same order, relink by index
-  snapMods.forEach((sm,i)=>{
-    const nm=newMods[i]; if(!nm) return;
-    if(sm.lfoTarget&&sm.lfoTarget.targetId!=='xfade'){
-      const ti=snapMods.findIndex(m=>m.id===sm.lfoTarget.targetId);
-      if(ti>=0&&newMods[ti]) nm.lfoTarget={targetId:newMods[ti].id,targetKnob:sm.lfoTarget.targetKnob};
-    }
-    if(sm.xyTargetX&&sm.xyTargetX.targetId!=='xfade'){
-      const ti=snapMods.findIndex(m=>m.id===sm.xyTargetX.targetId);
-      if(ti>=0&&newMods[ti]) nm.xyTargetX={targetId:newMods[ti].id,targetKnob:sm.xyTargetX.targetKnob};
-    }
-    if(sm.xyTargetY&&sm.xyTargetY.targetId!=='xfade'){
-      const ti=snapMods.findIndex(m=>m.id===sm.xyTargetY.targetId);
-      if(ti>=0&&newMods[ti]) nm.xyTargetY={targetId:newMods[ti].id,targetKnob:sm.xyTargetY.targetKnob};
-    }
+  // snap and new modules are in the same order: map old id → new id by index
+  const idMap={};
+  snapMods.forEach((sm,i)=>{if(sm.id&&newMods[i])idMap[sm.id]=newMods[i].id;});
+  const remap=t=>{
+    if(!t||!t.targetId||t.targetId==='xfade') return t;
+    return idMap[t.targetId]?{targetId:idMap[t.targetId],targetKnob:t.targetKnob}:null;
+  };
+  newMods.forEach(nm=>{
+    nm.lfoTarget=remap(nm.lfoTarget);
+    nm.xyTargetX=remap(nm.xyTargetX);
+    nm.xyTargetY=remap(nm.xyTargetY);
   });
-  rebuildSlots();
 }
 
 // auto-save current bank on every module add/remove/change
 const _origRebuild=rebuildSlots;
-rebuildSlots=function(){_origRebuild();autoSave();};
+rebuildSlots=function(){if(_bankSwitching)return;_origRebuild();autoSave();};
 </script>
 
 <!-- ARCHIVE PROMPT -->
@@ -8747,7 +9102,7 @@ const TUT_STEPS=[
 
   // ── CHAPTER 1: INTRO ──────────────────────────────────────
   {
-    _chapter:1, _chapterLabel:'intro',
+    id:'you-found-m', _chapter:1, _chapterLabel:'intro',
     _intro:true,
     text:"you found m-or.ph.",
     action:"m-or.ph is a live video mixer that runs entirely in your browser. no install. no account. just open it and start performing.",
@@ -8802,7 +9157,7 @@ const TUT_STEPS=[
   },
   // ch1 slide 2: creator
   {
-    _chapter:1, _chapterLabel:'intro', _concept:true,
+    id:'hello-im-vandope', _chapter:1, _chapterLabel:'intro', _concept:true,
     text:"hello, i'm vandope.",
     action:"so why did i build this? i just want to make trippy visuals. that's it. but finding software that makes me do that is harder than it should be. the free ones are bad, the good ones are expensive, and downloading a crack will get you malware. so m-or.ph was built.",
     illus:`<svg width="220" height="100" viewBox="0 0 220 100" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -8879,7 +9234,7 @@ const TUT_STEPS=[
   },
   // ch1 slide 3: bridge
   {
-    _chapter:1, _chapterLabel:'intro', _concept:true,
+    id:'what-exactly-does', _chapter:1, _chapterLabel:'intro', _concept:true,
     text:"what exactly does m-or.ph do?",
     action:"m-or.ph takes in 2 video inputs, runs them through funky effects, and sends out one clean trippy output. that's pretty much it. everything else is just how deep you want to go.",
     illus:`<svg width="290" height="100" viewBox="0 0 290 100" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -8970,7 +9325,7 @@ const TUT_STEPS=[
   },
   // ch1 slide 3: the three parts
   {
-    _chapter:1, _chapterLabel:'intro', _concept:true,
+    id:'three-things-to', _chapter:1, _chapterLabel:'intro', _concept:true,
     text:"three things to remember:\ninputs, effects, output.",
     action:"think of it like a DJ mixer but for video. inputs are your tracks, you load two. effects are your filters and knobs, you stack them. output is where it all goes: a projector, a TV, a second screen.\nthey work top to bottom. what goes in gets processed. what gets processed goes out.",
     illus:`<svg width="220" height="88" viewBox="0 0 220 88" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9035,7 +9390,7 @@ const TUT_STEPS=[
   },
   // ch1 end
   {
-    _chapter:1, _chapterLabel:'intro', _chapterEnd:true,
+    id:'thats-the-big', _chapter:1, _chapterLabel:'intro', _chapterEnd:true,
     text:"that's the big picture.",
     action:"move on to the next chapter to know more about inputs. or you can explore first on your own.",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9084,7 +9439,7 @@ const TUT_STEPS=[
   // ── CHAPTER 2: INPUTS ──────────────────────────────────────
   // ch2 slide 1: what sources are
   {
-    _chapter:2, _chapterLabel:'inputs', _concept:true,
+    id:'first-give-it', _chapter:2, _chapterLabel:'inputs', _concept:true,
     text:"first, give it something to look at.",
     action:"you have two input slots, A and B. each one can take a source: a video, photo, text, your webcam, a generated pattern, footage from the internet archive, or whatever's on your screen right now.",
     illus:`<svg width="280" height="120" viewBox="0 0 280 120" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9146,7 +9501,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 2: load A
   {
-    _chapter:2, _chapterLabel:'inputs',
+    id:'input-a-is', _chapter:2, _chapterLabel:'inputs',
     text:"input A is empty.",
     action:"the input panel is on the left. pick any source to fill it. moving pattern or mathematical are instant if you want to start quick.\n\nadd a source to input A.",
     confirm:"good. that's A.",
@@ -9200,7 +9555,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 3: load B
   {
-    _chapter:2, _chapterLabel:'inputs',
+    id:'now-fill-input', _chapter:2, _chapterLabel:'inputs',
     text:"now fill input B.",
     action:"same deal. pick anything. it doesn't have to match.\n\nadd a source to input B.",
     confirm:"both slots filled.",
@@ -9278,7 +9633,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 3b: source controls concept
   {
-    _chapter:2, _chapterLabel:'inputs', _concept:true,
+    id:'every-source-comes', _chapter:2, _chapterLabel:'inputs', _concept:true,
     text:"every source comes with the same base controls.",
     action:"size, rotate, and fade are always there. some sources add more on top. video adds speed and loop. text adds font, color, and content. webcam lets you pick your device. solid color gives you a color picker. the rest just use the base.",
     illus:`<svg width="200" height="188" viewBox="0 0 200 188" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9350,7 +9705,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 4: replace
   {
-    _chapter:2, _chapterLabel:'inputs',
+    id:'sources-are-swappable', _chapter:2, _chapterLabel:'inputs',
     text:"sources are swappable mid-set.",
     action:"the REPLACE button on each input lets you switch sources without stopping anything. no interruption, no drama.\n\nreplace the source in input B with something different.",
     confirm:"you already know how to switch sources mid-performance. you didn't even notice it was a skill.",
@@ -9369,7 +9724,7 @@ const TUT_STEPS=[
   },
   // ch2 slide 5: swap
   {
-    _chapter:2, _chapterLabel:'inputs',
+    id:'loaded-them-in', _chapter:2, _chapterLabel:'inputs',
     text:"loaded them in the wrong order?",
     action:"after sources have been selected, the top left panel shows the preview of inputs A and B. the swap button flips the 2 sources instantly\n\nswap inputs A and B.",
     confirm:"noted.",
@@ -9436,7 +9791,7 @@ const TUT_STEPS=[
   },
   // ch2 end
   {
-    _chapter:2, _chapterLabel:'inputs', _chapterEnd:true,
+    id:'you-now-control', _chapter:2, _chapterLabel:'inputs', _chapterEnd:true,
     text:"you now control what goes in.",
     action:"move on to the next chapter to know more about effects. or you can explore first on your own.",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9482,7 +9837,7 @@ const TUT_STEPS=[
   // ── CHAPTER 3: EFFECTS ─────────────────────────────────────
   // ch3 slide 1: what modules are
   {
-    _chapter:3, _chapterLabel:'effects', _concept:true,
+    id:'the-right-panel', _chapter:3, _chapterLabel:'effects', _concept:true,
     text:"the right panel is your effects rack.",
     action:"effects come in three flavors: processors, glitch, and modulators. let's go through each effect type one at a time",
     illus:`<svg width="264" height="74" viewBox="0 0 264 74" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9523,7 +9878,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 2: add processor
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'lets-start-with', _chapter:3, _chapterLabel:'effects',
     text:"let's start with processors and glitch.",
     action:"these effects can clean, transform, and destroy the source material. when stacked together, chaos ensues.\n\npick any effect under processors or glitch.",
     confirm:"first effect in the chain.",
@@ -9630,7 +9985,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 3: presets and knobs
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'every-effect-has', _chapter:3, _chapterLabel:'effects',
     text:"every effect has presets and knobs.",
     action:"presets change the mode. knobs control how much. they're yours to mess with.\n\nclick through at least three presets, then drag a knob.",
     confirm:"you have opinions about it already. good.",
@@ -9672,7 +10027,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 4: bypass
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'the-eye-icon', _chapter:3, _chapterLabel:'effects',
     text:"the eye icon is your on/off switch.",
     action:"this is bypass. toggle an effect off without removing it. useful when something looks wrong mid-set and you need to isolate it fast.\n\nclick the eye icon on your effect. watch the preview change.",
     confirm:"that's your \"i'll use you later button\", live.",
@@ -9712,7 +10067,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 5: modulators
   {
-    _chapter:3, _chapterLabel:'effects', _concept:true,
+    id:'modulators-are-different', _chapter:3, _chapterLabel:'effects', _concept:true,
     text:"modulators are different. they don't do anything on their own.",
     action:"they attach to other effects or to the crossfader and drive them automatically. add one, then click SEND TO and assign it to a knob on any processor or glitch effect. pick a wave shape. watch that knob move by itself.\nthat's automation. that's how you make something that performs without you touching it.",
     illus:`<svg width="220" height="56" viewBox="0 0 220 56" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9752,7 +10107,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 6: assign modulator
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'modulators-drive-other', _chapter:3, _chapterLabel:'effects',
     text:"modulators drive other effects automatically.",
     action:"add an oscillator, then use SEND TO to assign it to any knob on another effect. pick a wave. watch the knob move on its own.\n\nadd an oscillator and assign it to a knob.",
     confirm:"hands-free. now the machine is performing.",
@@ -9795,7 +10150,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 7: build to 5
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'the-chain-supports', _chapter:3, _chapterLabel:'effects',
     text:"the chain supports up to 5 effects.",
     action:"some are marked HEAVY. they cost more to run. the FPS counter is in the bottom bar. if it drops below 15, remove a heavy effect and watch it recover.\n\nstack effects until you hit 5.",
     confirm:"picking which 5 effects is now a mini game.",
@@ -9824,7 +10179,7 @@ const TUT_STEPS=[
   },
   // ch3 slide 8: reorder
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'order-changes-everything', _chapter:3, _chapterLabel:'effects',
     text:"order changes everything.",
     action:"color before glitch looks different than glitch before color. same two effects, completely different result.\n\ndrag the ⠿ handle to reorder your effects.",
     confirm:"the chain is yours.",
@@ -9848,11 +10203,12 @@ const TUT_STEPS=[
   },
   // ch3 slide 9: mixer + crossfader
   {
-    _chapter:3, _chapterLabel:'effects',
+    id:'the-crossfader-is', _chapter:3, _chapterLabel:'effects',
     text:"the crossfader is your blend control.",
     action:"it sits at the bottom and blends A and B before effects touch anything. the mixer preview shows you the raw mix. collapse the mixer panel if it's in the way.\n\nput the fader somewhere between 20 and 80. not 0, not 50, not 100.",
     confirm:"bold choice.",
-    complete:()=>state._tutXfade,
+    // any fader (bottom bar or mixer node) — just has to land in 20–80, not 50
+    complete:()=>{const x=+state.xfade;return x>=20&&x<=80&&x!==50;},
     illus:`<svg width="220" height="44" viewBox="0 0 220 44" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
       <defs>
         <style>
@@ -9886,7 +10242,7 @@ const TUT_STEPS=[
   },
   // ch3 end
   {
-    _chapter:3, _chapterLabel:'effects', _chapterEnd:true,
+    id:'your-chain-is', _chapter:3, _chapterLabel:'effects', _chapterEnd:true,
     text:"your chain is doing something now.",
     action:"ready to talk about output?",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9936,7 +10292,7 @@ const TUT_STEPS=[
   // ── CHAPTER 4: OUTPUT ──────────────────────────────────────
   // ch4 slide 1: three previews + popup sizing
   {
-    _chapter:4, _chapterLabel:'output', _concept:true,
+    id:'a-quick-orientation', _chapter:4, _chapterLabel:'output', _concept:true,
     text:"a quick orientation before we share anything.",
     action:"you have three views of your output: the small preview in the center, the master preview panel, and the output popup window. they all show the same thing at different sizes. those are all for your eyes, not your audience's.\nopen the popup now and try the different size options. you can place it anywhere on your screen, useful when the center output gets pushed down by effects, or when the preview feels too small to work with.",
     illus:`<svg width="220" height="62" viewBox="0 0 220 62" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -9975,7 +10331,7 @@ const TUT_STEPS=[
   },
   // ch4 slide 2: output window
   {
-    _chapter:4, _chapterLabel:'output',
+    id:'your-audience-sees', _chapter:4, _chapterLabel:'output',
     text:"your audience sees a separate window.",
     action:"click OUTPUT WINDOW in the top bar. it'll open as a new window or tab. if it's a tab, drag it out. then drag it to your second screen and press F to fullscreen. running live video through a browser to a projector with no app installed. yeah.\n\nopen the output window.",
     confirm:"output is live.",
@@ -10079,7 +10435,7 @@ const TUT_STEPS=[
   },
   // ch4 slide 3: capture
   {
-    _chapter:4, _chapterLabel:'output',
+    id:'capture-saves-your', _chapter:4, _chapterLabel:'output',
     text:"CAPTURE saves your work.",
     action:"PHOTO grabs a PNG of the current frame. VIDEO records up to 60 seconds as a .webm. after you capture, check your downloads folder right away to confirm it's there.\n\ntake a photo or start a recording.",
     confirm:"check your downloads. you'll be glad you did.",
@@ -10113,7 +10469,7 @@ const TUT_STEPS=[
   },
   // ch4 end
   {
-    _chapter:4, _chapterLabel:'output', _chapterEnd:true,
+    id:'you-can-now', _chapter:4, _chapterLabel:'output', _chapterEnd:true,
     text:"you can now share your work with the outside world.",
     action:"one last chapter.",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -10173,7 +10529,7 @@ const TUT_STEPS=[
   // ── CHAPTER 5: OUTRO ───────────────────────────────────────
   // ch5 slide 1: theme + CRT
   {
-    _chapter:5, _chapterLabel:'extras',
+    id:'two-switches-in', _chapter:5, _chapterLabel:'extras',
     text:"two switches in the top left bar.",
     action:"theme toggles light and dark mode. CRT adds a scanline overlay that makes everything look like it's on a 1987 television. it's a feature.\n\ntry both. pick your vibe.",
     confirm:"established.",
@@ -10206,7 +10562,7 @@ const TUT_STEPS=[
   },
   // ch5 slide 2: tooltips
   {
-    _chapter:5, _chapterLabel:'extras', _concept:true,
+    id:'hover-over-anything', _chapter:5, _chapterLabel:'extras', _concept:true,
     text:"hover over anything you don't understand.",
     action:"the GETTING STARTED panel in the bottom left updates in real time based on whatever you're hovering. not generic help, specific tips for that exact thing. it knows.\nmost people skip this entirely. those people ask questions that are already answered. don't be those people.",
     illus:`<svg width="220" height="60" viewBox="0 0 220 60" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
@@ -10262,7 +10618,7 @@ const TUT_STEPS=[
   },
   // ch5 end / final
   {
-    _chapter:5, _chapterLabel:'extras', _final:true,
+    id:'thats-everything', _chapter:5, _chapterLabel:'extras', _final:true,
     text:"that's everything.",
     illus:`<svg width="190" height="114" viewBox="0 0 190 114" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
       <defs>
@@ -10339,19 +10695,32 @@ const _CHAPTERS=[
   {n:5,label:'extras'},
 ];
 
+// progress is stored as the step's id so inserting/removing steps doesn't
+// shift users onto the wrong slide; old numeric index values still load
 function _saveProgress(){
-  try{localStorage.setItem('morph_tut_step',String(_ts));}catch(e){}
+  const s=TUT_STEPS[_ts];
+  try{localStorage.setItem('morph_tut_step',s&&s.id?s.id:String(_ts));}catch(e){}
 }
 
 function _loadProgress(){
-  try{const v=localStorage.getItem('morph_tut_step');return v!==null?Math.max(0,parseInt(v,10)||0):0;}catch(e){return 0;}
+  try{
+    const v=localStorage.getItem('morph_tut_step');
+    if(v===null) return 0;
+    if(/^\d+$/.test(v)) return Math.max(0,parseInt(v,10)||0);
+    const i=TUT_STEPS.findIndex(s=>s.id===v);
+    return i>=0?i:0;
+  }catch(e){return 0;}
 }
 
 let _tutReviewMode=false;
+let _tutFpsIv=null,_tutCtaT=null;
 
 function startTutorial(){
   // tutorial targets desktop panels that are hidden in TV mode — don't start
-  if(document.body.classList.contains('tv')) return;
+  if(document.body.classList.contains('tv')){setStatus('tutorial needs the desktop layout — switch back to hd first');return;}
+  // already running: just bring the card back (a second start orphaned the
+  // 400ms check interval and stacked listeners)
+  if(_ta){const tc=document.getElementById('tut-card');if(tc)tc.style.display='block';return;}
   // if already completed, enter review mode — all steps are freely skippable
   try{_tutReviewMode=!!localStorage.getItem('morph_tut_done');}catch(e){_tutReviewMode=false;}
   // resume where left off if in progress, otherwise start fresh
@@ -10359,7 +10728,7 @@ function startTutorial(){
   _ts=(saved>0&&saved<TUT_STEPS.length)?saved:0;
   _ta=true;_tsReady=false;
   if(_ts===0){
-    state._tutXfade=false;state._tutKnob=false;state._tutBypass=false;
+    state._tutKnob=false;state._tutBypass=false;
     state._tutCapture=false;state._tutPresets=0;state._tutOutput=false;
     state._tutSwap=false;state._tutReplace=false;state._tutReorder=false;
     state._tutTheme=false;state._tutCRT=false;state._tutFpsWarning=false;
@@ -10380,12 +10749,15 @@ function startTutorial(){
       tutCard.style.top=(r.top/totalZoom)+'px';
     }
   });});
+  clearInterval(_tp);
   _tp=setInterval(_checkTS,400);
-  document.addEventListener('keydown',_tutEsc);
-  if(!window._tutXfadePatched){
-    window._tutXfadePatched=true;
-    document.getElementById('mxf').addEventListener('input',()=>{state._tutXfade=true;});
-  }
+  // low-fps watch only while the tutorial runs (it used to poll from page load)
+  clearInterval(_tutFpsIv);
+  _tutFpsIv=setInterval(()=>{if(typeof _currentFps!=='undefined'&&_currentFps<15&&_currentFps>0)state._tutFpsWarning=true;},1000);
+  // capture phase: runs before the pick-mode / panel Escape handlers, so it
+  // can still see that Escape belongs to them
+  window.removeEventListener('keydown',_tutEsc,true);
+  window.addEventListener('keydown',_tutEsc,true);
   const _origOO=window.openOutput;
   if(!window._tutOOPatched){
     window._tutOOPatched=true;
@@ -10394,11 +10766,19 @@ function startTutorial(){
   _makeDraggable(document.getElementById('tut-card'));
 }
 
-function endTutorial(completed){
+// shared teardown for end + pause
+function _tutStop(){
   _ta=false;
   document.getElementById('tut-card').style.display='none';
-  clearInterval(_tp);
-  document.removeEventListener('keydown',_tutEsc);
+  const sm=document.getElementById('skip-modal');if(sm)sm.style.display='none';
+  clearInterval(_tp);_tp=null;
+  clearInterval(_tutFpsIv);_tutFpsIv=null;
+  clearTimeout(_tutCtaT);_tutCtaT=null;
+  window.removeEventListener('keydown',_tutEsc,true);
+}
+
+function endTutorial(completed){
+  _tutStop();
   if(completed){
     try{localStorage.setItem('morph_tut_done','1');localStorage.removeItem('morph_tut_step');localStorage.setItem('morph_tut_highest_ch','5');localStorage.removeItem('morph_skip_shown');}catch(e){}
   } else {
@@ -10434,14 +10814,29 @@ function _skipModalDismiss(){
 
 function _exploreTS(){
   // pause: hide card, save progress
-  _ta=false;
-  document.getElementById('tut-card').style.display='none';
-  clearInterval(_tp);
+  _tutStop();
   _saveProgress();
   setStatus('tutorial paused. click "? tutorial" to pick up where you left off.');
 }
 
-function _tutEsc(e){if(e.key==='Escape')endTutorial(false);}
+// Escape pauses (keeps progress) instead of ending + wiping it, and is left
+// alone when it belongs to something else: pick mode (which the tutorial
+// itself asks for), the capture panel/countdown, archive prompt, videos
+// browser, or the skip modal (Escape just closes that)
+function _tutEsc(e){
+  if(e.key!=='Escape'||!_ta) return;
+  const sm=document.getElementById('skip-modal');
+  if(sm&&sm.style.display&&sm.style.display!=='none'){sm.style.display='none';return;}
+  if(pickMode) return;
+  if(typeof _capturePanelOpen!=='undefined'&&(_capturePanelOpen||countdownActive)) return;
+  if(document.getElementById('archive-prompt-overlay')?.classList.contains('open')) return;
+  if(document.getElementById('vb-modal')) return;
+  const bo=document.getElementById('boot-overlay');
+  if(bo&&!bo.classList.contains('dismissed')) return;
+  const t=e.target;
+  if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable)) return;
+  _exploreTS();
+}
 
 function _nextTS(){
   _tsReady=false;
@@ -10501,6 +10896,8 @@ function _checkTS(){
 
 function _showTS(i){
   _tsReady=false;
+  // a pending "your turn" reveal belongs to the previous slide
+  clearTimeout(_tutCtaT);_tutCtaT=null;
   document.getElementById('tc-btn-wrap').style.display='none';
   document.getElementById('tc-confirm').style.display='none';
   const s=TUT_STEPS[i];
@@ -10600,7 +10997,8 @@ function _showTS(i){
     const body=actionParts.slice(0,-1).join('\n\n').replace(/\n/g,'<br>');
     const cta=actionParts[actionParts.length-1];
     actionEl.innerHTML=body+'<div class="tc-cta-wrap" id="tc-cta-wrap"><span class="tc-cta-label">your turn:</span><span class="tc-cta">'+cta+'</span></div>';
-    setTimeout(()=>{const w=document.getElementById('tc-cta-wrap');if(w)w.classList.add('visible');},2000);
+    clearTimeout(_tutCtaT);
+    _tutCtaT=setTimeout(()=>{_tutCtaT=null;const w=document.getElementById('tc-cta-wrap');if(w)w.classList.add('visible');},2000);
   } else {
     actionEl.innerHTML=s.action.replace(/\n/g,'<br>');
   }
@@ -10661,6 +11059,9 @@ function _showTS(i){
 }
 
 function _makeDraggable(el){
+  // wire once — startTutorial used to add three more listeners every open
+  if(!el||el._tutDrag) return;
+  el._tutDrag=true;
   let ox=0,oy=0,sx=0,sy=0,drag=false;
   el.style.cursor='grab';
   el.addEventListener('mousedown',e=>{
@@ -10691,10 +11092,6 @@ window._origMKD=makeKnobDrag;
 makeKnobDrag=function(id,w){const f=window._origMKD(id,w);return function(e){state._tutKnob=true;return f.call(this,e);};};
 window._origTB=toggleBypass;
 toggleBypass=function(id){state._tutBypass=true;return window._origTB(id);};
-window._origTP=takePhoto;
-takePhoto=function(){state._tutCapture=true;return window._origTP();};
-window._origTR=toggleRecord;
-toggleRecord=function(){state._tutCapture=true;return window._origTR();};
 window._origSF=setFx;
 setFx=function(id,idx){if(!state._tutPresets)state._tutPresets=0;state._tutPresets++;return window._origSF(id,idx);};
 // new hooks
@@ -10706,7 +11103,6 @@ window._origTC=toggleCRT;
 toggleCRT=function(){state._tutCRT=true;return window._origTC.apply(this,arguments);};
 // replace hook: fires when a source is successfully loaded into an already-active slot
 (function(){
-  const _origSrcSet=window.setSource||null;
   // watch for the replace button being used — set flag only when source actually loads
   const _origSPM=window.startPickMode;
   if(_origSPM){
@@ -10717,13 +11113,12 @@ toggleCRT=function(){state._tutCRT=true;return window._origTC.apply(this,argumen
     };
   }
 })();
-// FPS warning hook
-(function _watchFPS(){
-  setInterval(()=>{if(typeof _currentFps!=='undefined'&&_currentFps<15&&_currentFps>0)state._tutFpsWarning=true;},1000);
-})();
 
 const _obDB=window.dismissBoot;
-window.dismissBoot=function(){if(_obDB)_obDB();try{const done=localStorage.getItem('morph_tut_done')||localStorage.getItem('morph_tut_seen');if(!done)setTimeout(startTutorial,800);}catch(e){}};
+// auto-start once for first-time users (the boot sequence and a key press
+// can both call dismissBoot)
+let _tutAutoQueued=false;
+window.dismissBoot=function(){if(_obDB)_obDB();if(_tutAutoQueued)return;try{const done=localStorage.getItem('morph_tut_done')||localStorage.getItem('morph_tut_seen');if(!done){_tutAutoQueued=true;setTimeout(startTutorial,800);}}catch(e){}};
 
 // Sync button states to match boot classes (dark + crt on by default)
 (function initBootUI(){
