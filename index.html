@@ -1332,6 +1332,15 @@ body.dark .bypass-btn.off rect{fill:var(--paper);}
 .tut-cursor.tut-down svg{transform:scale(.85);transform-origin:0 0;}
 .tut-cursor.tut-drag{transition:transform .9s linear;}
 @media (prefers-reduced-motion:reduce){.tut-cursor{display:none;}}
+/* card shapes: the card never scales (text stays one size); it changes shape
+   to fit beside the spotlight, and only the graphic shrinks */
+#tut-card.tut-shape-tall{width:230px;}
+#tut-card.tut-shape-tall .tc-tabs{display:none;}
+#tut-card.tut-shape-wide{width:620px;}
+#tut-card.tut-shape-wide .tc-inner{display:grid;grid-template-columns:240px 1fr;column-gap:16px;align-items:start;}
+#tut-card.tut-shape-wide .tc-inner>*{grid-column:2;}
+#tut-card.tut-shape-wide #tc-illus{grid-column:1;grid-row:1/span 12;margin-bottom:0;}
+#tut-card.tut-noillus #tc-illus{display:none!important;}
 #tut-dim{position:fixed;inset:0;z-index:8950;pointer-events:none;display:none;}
 #tut-dim svg{display:block;width:100%;height:100%;}
 #tut-dim path{fill:rgba(0,0,0,0.62);fill-rule:evenodd;}
@@ -11739,8 +11748,8 @@ function _tutLiveShow(step,illusEl){
   // scale the copy to fill the card width (copies keep their real pixel size).
   // a timer, not rAF: rAF never fires while the tab is hidden
   setTimeout(()=>{
-    const avail=stage.clientWidth-24, natural=inner.scrollWidth;
-    if(natural>avail) inner.style.zoom=(avail/natural).toFixed(3);
+    const card=document.getElementById('tut-card');
+    _tutFitIllus(card&&card._tutGs!=null?card._tutGs||1:1);
     const run=_tutLiveRun;
     const loop=async()=>{
       try{while(run===_tutLiveRun&&stage.isConnected){await L.run(_tutLiveApi(stage,run));stage.querySelectorAll('.tut-cursor').forEach(c=>c.remove());}}
@@ -11781,7 +11790,10 @@ const TUT_FOCUS={
   'hover-over-anything':['#helper'],
   'thats-everything':['#btn-tutorial'],
 };
-const TUT_PAD=6, TUT_GAP=14, TUT_EDGE=8, TUT_ZOOMS=[1.5,1.35,1.2,1.05,0.95,0.85,0.75];
+const TUT_PAD=6, TUT_GAP=14, TUT_EDGE=8, TUT_Z=1.5;
+// tried in order: every shape with the full graphic, then smaller graphics.
+// dropping the graphic (0) is only the last resort when nothing fits on screen
+const TUT_SHAPES=['base','wide','tall'], TUT_GRAPHIC=[1,0.8,0.65,0.5,0.38];
 
 function _tutVisible(el){
   if(!el.getClientRects().length) return false;
@@ -11836,7 +11848,7 @@ const _tutInView=a=>a.x0>=TUT_EDGE-1&&a.y0>=TUT_EDGE-1&&a.x1<=innerWidth-TUT_EDG
 function _tutBestSpot(W,H,rects,allowOverlap){
   const vw=innerWidth,vh=innerHeight;
   if(W>vw-2*TUT_EDGE||H>vh-2*TUT_EDGE) return null;
-  if(!rects.length) return {x:(vw-W)/2,y:(vh-H)/2};
+  if(!rects.length) return {x:(vw-W)/2,y:(vh-H)/2,score:0};
   const U=rects.reduce((a,r)=>({x0:Math.min(a.x0,r.x0),y0:Math.min(a.y0,r.y0),x1:Math.max(a.x1,r.x1),y1:Math.max(a.y1,r.y1)}));
   const ucx=(U.x0+U.x1)/2,ucy=(U.y0+U.y1)/2;
   let best=null,bestScore=Infinity;
@@ -11859,17 +11871,37 @@ function _tutBestSpot(W,H,rects,allowOverlap){
       // edge gap to the focus union, centre distance as a tie-break
       const gx=Math.max(0,U.x0-a.x1,a.x0-U.x1),gy=Math.max(0,U.y0-a.y1,a.y0-U.y1);
       const score=over*1000+Math.hypot(gx,gy)+0.05*Math.hypot(x+W/2-ucx,y+H/2-ucy);
-      if(score<bestScore){bestScore=score;best={x,y};}
+      if(score<bestScore){bestScore=score;best={x,y,score};}
     }
   }
   return best;
 }
-function _tutPlaceCard(card,x,y,z){
+// graphic scale: drawings and live copies fit the illus slot's width, times gs
+function _tutFitIllus(gs){
+  const il=document.getElementById('tc-illus');if(!il) return;
+  const avail=il.clientWidth;
+  const svg=il.querySelector(':scope > svg');
+  if(svg){const nat=+svg.getAttribute('width')||220;svg.style.zoom=(Math.min(1,avail/nat)*gs).toFixed(3);}
+  const stage=il.querySelector('.tut-live');
+  if(stage){
+    const inner=stage.querySelector('.tut-live-inner');
+    if(!inner._nat){inner.style.zoom=1;inner._nat=inner.scrollWidth||1;}
+    inner.style.zoom=(Math.min(1,(stage.clientWidth-24)/inner._nat)*gs).toFixed(3);
+  }
+}
+function _tutSetShape(card,shape,gs){
+  card.classList.remove('tut-shape-base','tut-shape-tall','tut-shape-wide');
+  card.classList.add('tut-shape-'+shape);
+  card.classList.toggle('tut-noillus',gs===0);
+  card._tutShape=shape;card._tutGs=gs;
+  if(gs) _tutFitIllus(gs);
+}
+function _tutPlaceCard(card,x,y){
   const appZoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1;
-  card.style.zoom=z;
+  card.style.zoom=TUT_Z;
   card.style.transform='none';card.style.bottom='auto';
-  card.style.left=(x/(appZoom*z))+'px';
-  card.style.top=(y/(appZoom*z))+'px';
+  card.style.left=(x/(appZoom*TUT_Z))+'px';
+  card.style.top=(y/(appZoom*TUT_Z))+'px';
 }
 // force: new step / resize — re-place the card from scratch. otherwise the card
 // only moves when it now overlaps the focus or falls off screen (content grew)
@@ -11883,26 +11915,52 @@ function _tutLayout(force){
   const cr=card.getBoundingClientRect();
   const cur={x0:cr.left,y0:cr.top,x1:cr.right,y1:cr.bottom};
   if(card._tutManual&&!force) return;
-  if(!force&&!_tutHit(cur,rects,TUT_GAP-2)&&_tutInView(cur)) return;
-  const z0=parseFloat(card.style.zoom)||parseFloat(getComputedStyle(card).zoom)||1.5;
-  const bw=cr.width/z0,bh=cr.height/z0;   // card size at zoom 1
+  if(!force&&card._tutSettled&&_tutInView(cur)&&(card._tutOverlap||!_tutHit(cur,rects,TUT_GAP-2))) return;
+  card.style.zoom=TUT_Z;
+  const measure=()=>{const r=card.getBoundingClientRect();return [r.width,r.height];};
   let pick=null;
-  for(const z of TUT_ZOOMS){
-    const spot=_tutBestSpot(bw*z,bh*z,rects);
-    if(spot){pick={...spot,z};break;}
+  // 1) a shape that sits clear of the focus, biggest graphic first
+  outer: for(const gs of TUT_GRAPHIC){
+    for(const shape of TUT_SHAPES){
+      _tutSetShape(card,shape,gs);
+      const [W,H]=measure();
+      const spot=_tutBestSpot(W,H,rects);
+      if(spot){pick={...spot,shape,gs,overlap:false};break outer;}
+    }
+  }
+  // 2) nothing is clear (small screens): the shape that covers the least of the
+  //    focus, with the biggest graphic that still fits on screen
+  if(!pick){
+    // least covered area wins; a bigger graphic only breaks near-ties
+    // (score is covered px² ×1000 + distance; 2000px² per graphic step)
+    let best=Infinity;
+    for(const gs of TUT_GRAPHIC){
+      for(const shape of TUT_SHAPES){
+        _tutSetShape(card,shape,gs);
+        const [W,H]=measure();
+        const spot=_tutBestSpot(W,H,rects,true);
+        if(!spot) continue;
+        const key=spot.score-gs*2e6;
+        if(key<best){best=key;pick={...spot,shape,gs,overlap:true};}
+      }
+    }
   }
   if(!pick){
-    // nothing fits clear of the focus (small screens): smallest card, placed
-    // where it covers the least of it
-    const z=TUT_ZOOMS[TUT_ZOOMS.length-1];
-    const spot=_tutBestSpot(bw*z,bh*z,rects,true);
-    pick=spot?{...spot,z}:{x:Math.max(TUT_EDGE,innerWidth-bw*z-TUT_EDGE),y:TUT_EDGE,z};
+    for(const shape of TUT_SHAPES){
+      _tutSetShape(card,shape,0);
+      const [W,H]=measure();
+      const spot=_tutBestSpot(W,H,rects,true);
+      if(spot&&(!pick||spot.score<pick.score)) pick={...spot,shape,gs:0,overlap:true};
+    }
   }
-  _tutPlaceCard(card,pick.x,pick.y,pick.z);
+  if(!pick){_tutSetShape(card,'tall',0);const [W]=measure();pick={x:Math.max(TUT_EDGE,innerWidth-W-TUT_EDGE),y:TUT_EDGE,shape:'tall',gs:0,overlap:true};}
+  _tutSetShape(card,pick.shape,pick.gs);
+  _tutPlaceCard(card,pick.x,pick.y);
+  card._tutSettled=true;card._tutOverlap=pick.overlap;
 }
 function _tutFocusStep(step){
   const card=document.getElementById('tut-card');
-  if(card) card._tutManual=false;
+  if(card){card._tutManual=false;card._tutSettled=false;}
   // scroll the first focus target that's scrolled out of view (chain nodes) in
   for(const f of TUT_FOCUS[step&&step.id]||[]){
     const el=[...document.querySelectorAll(typeof f==='object'?f.u:f)].find(_tutVisible);
