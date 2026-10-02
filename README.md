@@ -34,7 +34,6 @@ built by [vandope](https://instagram.com/vandope__) — visual engineer and crea
 - [performance engineering](#performance-engineering)
 - [UI system](#ui-system)
 - [accessibility](#accessibility)
-- [test harness](#test-harness)
 - [keyboard shortcuts](#keyboard-shortcuts)
 - [persistence](#persistence)
 - [browser support & permissions](#browser-support--permissions)
@@ -257,7 +256,7 @@ modulators don't process video — they move other knobs automatically via **sen
 
 ### v1.6 — the audit pass
 
-a second, full audit (bugs, perf, front-end hygiene) measured every effect at 854×480 and fixed what it found. every number below comes from `tools/harness`.
+a second, full audit (bugs, perf, front-end hygiene) measured every effect at 854×480 and fixed what it found. every number below was measured with an in-house Playwright benchmark.
 
 - **GPU-resident chain** — per-module textures, lazy 2D materialization, no `readPixels` (see [the GL processor](#the-gl-processor)). the ~2.5ms-per-GL-module floor is gone
 - **worst CPU paths ported to shaders** — bloom, chroma aberration, separable erode/dilate, all keyer modes, color trails and gain. pixel sort stays on the CPU but on typed arrays with a radix sort (it used to allocate ~410k objects a frame)
@@ -304,20 +303,6 @@ general rules encoded in the codebase:
 - knobs, source faders and the mixer crossfader are `role="slider"`: arrows ±1%, shift or page ±10%, home / end
 - icon-only buttons have labels; dialogs have `role="dialog"`
 
-## test harness
-
-`tools/harness` is a Playwright script with its own `package.json` (dev only; the app itself still has zero dependencies):
-
-```
-cd tools/harness && npm ci
-node run.mjs                 # smoke + bench + shots, compared to baseline/
-node run.mjs --only smoke    # fast correctness pass
-```
-
-- **smoke** — every source type, every effect × 8 modes, every modulator, a 5-module chain, the output window, theme/CRT toggles; fails on any console or page error
-- **bench** — ms/frame per effect at 854×480 with the governor pinned
-- **shots** — the UI in dark+crt / dark / light / light+crt with canvases hidden and animations frozen, pixel-diffed against `baseline/shots`
-
 ## keyboard shortcuts
 
 | key | context | action |
@@ -350,12 +335,12 @@ no accounts, no cookies, no analytics, no uploads. your media never leaves your 
 
 ## project status
 
-current version: **v1.8** — tutorial with spotlight and live UI illustrations, 10-effect chain, rewritten help panel. built on v1.6, the second audit pass: GPU-resident chain, cost-based governor, filter-free dark mode, compositor-only CRT, accessibility, test harness. still one file.
+current version: **v1.8** — tutorial with spotlight and live UI illustrations, 10-effect chain, rewritten help panel. built on v1.6, the second audit pass: GPU-resident chain, cost-based governor, filter-free dark mode, compositor-only CRT, accessibility. still one file.
 
 | | |
 |---|---|
 | **v1.5** | single `index.html`, hybrid GL/CPU pipeline, performance governor, TV mode, full tutorial |
-| **v1.6** | audit fixes (see [performance engineering](#performance-engineering)); design-system tokens; harness in `tools/harness` |
+| **v1.6** | audit fixes (see [performance engineering](#performance-engineering)); design-system tokens; Playwright test harness |
 | **v1.7** | 10-effect chain (3 heavy, 6 modulators), tutorial spotlight, help panel rewrite |
 | **v1.8 (this)** | tutorial: live copies of the real UI, fixed text size with card shapes, type pass on tutorial and popups |
 | **v2 (next)** | new architecture built on the v1.6 cleanup; the single-file constraint is on the table |
