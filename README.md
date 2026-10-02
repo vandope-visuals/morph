@@ -57,7 +57,7 @@ first launch auto-starts the interactive in-app tutorial. it remembers where you
 
 - **two input slots (A / B)** — video files, images, live webcam, screen capture, typed text, solid colors, procedural patterns, mathematical/fractal generators, or footage pulled straight from the Internet Archive
 - **a crossfader** that blends A and B before the chain
-- **an effects rack** — up to 5 stacked effects across three categories: processors (clean transforms), glitch (controlled destruction), and modulators (automation that drives other knobs)
+- **an effects rack** — up to 10 stacked effects (plus up to 6 modulators) across three categories: processors (clean transforms), glitch (controlled destruction), and modulators (automation that drives other knobs)
 - **drag-to-reorder chain** — effect order changes everything; color→glitch ≠ glitch→color
 - **live output** to a popup window you can drag to a projector and fullscreen with `F`
 - **capture** — PNG photos and WebM recordings (up to 60s) at canonical 720p, croppable to 16:9 / 1:1 / 9:16
@@ -206,7 +206,7 @@ sources are hot-swappable mid-set via **REPLACE** (no output interruption) and *
 
 ### effects
 
-three categories, up to 5 in the chain, max 2 HEAVY. every effect has presets (modes) and knobs (intensity + param), a bypass eye, and a ⠿ drag handle for reordering.
+three categories, up to 10 effects in the chain (modulators don't count, up to 6 of those), max 3 HEAVY. every effect has presets (modes) and knobs (intensity + param), a bypass eye, and a ⠿ drag handle for reordering.
 
 **processors** — clean, non-destructive transforms:
 
@@ -350,12 +350,14 @@ no accounts, no cookies, no analytics, no uploads. your media never leaves your 
 
 ## project status
 
-current version: **v1.6** — the second audit pass: GPU-resident chain, cost-based governor, filter-free dark mode, compositor-only CRT, accessibility, test harness. still one file.
+current version: **v1.8** — tutorial with spotlight and live UI illustrations, 10-effect chain, rewritten help panel. built on v1.6, the second audit pass: GPU-resident chain, cost-based governor, filter-free dark mode, compositor-only CRT, accessibility, test harness. still one file.
 
 | | |
 |---|---|
 | **v1.5** | single `index.html`, hybrid GL/CPU pipeline, performance governor, TV mode, full tutorial |
-| **v1.6 (this)** | audit fixes (see [performance engineering](#performance-engineering)); design-system tokens; harness in `tools/harness` |
+| **v1.6** | audit fixes (see [performance engineering](#performance-engineering)); design-system tokens; harness in `tools/harness` |
+| **v1.7** | 10-effect chain (3 heavy, 6 modulators), tutorial spotlight, help panel rewrite |
+| **v1.8 (this)** | tutorial: live copies of the real UI, fixed text size with card shapes, type pass on tutorial and popups |
 | **v2 (next)** | new architecture built on the v1.6 cleanup; the single-file constraint is on the table |
 
 ---
